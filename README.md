@@ -1,8 +1,9 @@
 # Get-ClaudeCodeSessions
 
-PowerShell utility for browsing and triaging Claude Code session transcripts.
-List every session across every project, see custom titles, drill into any
-conversation, and clean up what you don't need.
+PowerShell utility for browsing, triaging, and cleaning up Claude Code session
+transcripts. List every session across every project, see custom titles, drill
+into any conversation, and delete what you don't need — with `Tab` completion on
+session names and a guard rail that won't let an unfiltered delete wipe everything.
 
 ## What it does
 
@@ -11,7 +12,9 @@ Claude Code stores every session as a JSONL file under
 these accumulate into hundreds of UUID-named files with no obvious way to tell
 what's what. This script reads them, extracts the parts that actually matter
 (working directory, custom title, conversation turns), and presents a sorted,
-indexed table.
+indexed table. From there you can drill into any conversation or delete the
+sessions you no longer want — selecting them by age, size, name, or absence of
+a title, with a preview-then-delete workflow and per-file confirmation.
 
 ```
 Index Folder                  Session          Modified              Size File
@@ -51,7 +54,7 @@ ok let's also handle the case where the queue is empty on shutdown
 
 - Windows
 - PowerShell 7+ (uses ANSI escape codes, parameter sets, and modern sort syntax)
-- Claude Code installed; the script only reads session history, never modifies it
+- Claude Code installed; the script only reads session history unless you pass `-Delete`
 
 ## Installation
 
@@ -91,6 +94,13 @@ Get-ClaudeCodeSessions -Open my-app -PromptEnd 10    # by custom Session name
 that matches either the filename or the Session name. Substring matches may
 return multiple results.
 
+**Tab completion:** press `Tab` after `-Open` to cycle through your actual
+session handles — custom titles first (auto-quoted when they contain spaces),
+then UUID filenames, each with a folder/timestamp tooltip. The completer
+*replaces* the default behavior, so it no longer suggests unrelated files
+(`README.md`, `.gitignore`) from the current directory. Title lookups are
+cached per file and refresh when a session changes, so repeat presses are fast.
+
 ### Show conversation turns
 
 ```powershell
@@ -115,19 +125,43 @@ Search is case-insensitive literal matching, not regex. Punctuation like
 
 ### Cleanup
 
+Deletion is built in. The workflow is **preview, then delete the same set**:
+run a command with the narrowing selectors to see the table, then re-run the
+*identical* command with `-Delete` appended.
+
 ```powershell
-# Tiny or abandoned sessions
-Get-ClaudeCodeSessions | Where-Object Size -lt 5
+# 1. Preview: everything untouched in 30+ days
+Get-ClaudeCodeSessions -OlderThan 30
 
-# Sessions older than 30 days (dry-run)
-Get-ClaudeCodeSessions | Where-Object Modified -lt (Get-Date).AddDays(-30) |
-    ForEach-Object { Remove-Item $_.FullPath -WhatIf }
-
-# Drop -WhatIf to actually delete
-
-# Find unnamed sessions
-Get-ClaudeCodeSessions | Where-Object { -not $_.Session }
+# 2. Delete that exact set (prompts before each file)
+Get-ClaudeCodeSessions -OlderThan 30 -Delete
 ```
+
+Selectors combine with logical AND, so you can be surgical:
+
+```powershell
+# Tiny AND never-titled sessions, no per-file prompt
+Get-ClaudeCodeSessions -SmallerThan 5 -Unnamed -Delete -Confirm:$false
+
+# Dry-run a search-scoped delete (lists victims, deletes nothing)
+Get-ClaudeCodeSessions -Search "scratch" -Delete -WhatIf
+
+# Delete one specific session by index
+Get-ClaudeCodeSessions -Open 23 -Delete
+```
+
+**Safety model:**
+
+- `-Delete` **refuses to run without a selector** (`-Search`, `-Open`,
+  `-OlderThan`, `-SmallerThan`, or `-Unnamed`). A bare `-Delete` errors out
+  rather than offering to wipe every session you own.
+- Deletion is **permanent** — straight `Remove-Item`, no Recycle Bin. The
+  per-file confirmation prompt (`ConfirmImpact='High'`) is the safety net.
+  Suppress it with `-Confirm:$false` once you trust the preview.
+- `-WhatIf` lists exactly what would be removed and touches nothing.
+
+The selectors also work on their own as read-only filters — `-OlderThan 30`
+without `-Delete` is just a narrower table.
 
 ## Parameters
 
@@ -139,6 +173,10 @@ Get-ClaudeCodeSessions | Where-Object { -not $_.Session }
 | `-PromptStart <N>` | Show only the first N turns. Mutually exclusive with `-Prompt`. |
 | `-PromptEnd <N>` | Show only the last N turns. Mutually exclusive with `-Prompt`. |
 | `-Limit <N>` | Cap the number of sessions returned. 0 (default) = no limit. |
+| `-OlderThan <N>` | Keep only sessions older than N days (by `Modified`). 0 (default) disables. |
+| `-SmallerThan <N>` | Keep only sessions under N KB. 0 (default) disables. |
+| `-Unnamed` | Keep only sessions with no custom `/title`. |
+| `-Delete` | Permanently delete the filtered set. Requires a selector; supports `-WhatIf`/`-Confirm`; prompts per file. |
 | `-PromptMaxChars <N>` | Truncate each turn's text. Default 600. Use 0 for no truncation. |
 | `-IncludeSubagents` | Include subagent transcripts (`subagents/agent-*.jsonl`). Off by default. |
 | `-NoColor` | Disable ANSI colors. Useful when piping to a file. Applies to `-Prompt` and `-Help` output. |
@@ -169,8 +207,9 @@ under a project cluster together with the most recent on top.
 - `-Open <name>` may return multiple results because Claude Code creates a
   new file each time you re-enter a project. That's intentional; you usually
   want the full history under that name.
-- The script never writes to session files. All cleanup goes through
-  `Remove-Item` on the `FullPath` property.
+- The script never *modifies* session files. The only write operation is
+  `-Delete`, which removes whole transcripts via `Remove-Item` on `FullPath`
+  and refuses to run without a narrowing selector.
 - ANSI colors require a terminal that supports them (Windows Terminal,
   modern VS Code terminal, recent ConEmu). Use `-NoColor` when redirecting.
 - Custom session titles are pulled from `custom-title` events embedded in

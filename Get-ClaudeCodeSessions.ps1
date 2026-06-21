@@ -62,6 +62,42 @@
     Note: this is named -Open instead of -File because pwsh.exe treats
     -File as its own script-launcher argument and would eat the value.
 
+.PARAMETER Delete
+    Permanently delete the sessions in the (filtered) result set. Refuses to
+    run without at least one selector (-Search, -Open, -OlderThan,
+    -SmallerThan, or -Unnamed) so a bare -Delete can never wipe everything.
+    Supports -WhatIf and -Confirm; prompts per file by default because the
+    deletion is permanent (no Recycle Bin). Preview by running the identical
+    command WITHOUT -Delete - the table shows exactly what would be removed.
+
+.PARAMETER OlderThan
+    Keep only sessions whose Modified time is older than N days. Combines with
+    other selectors (logical AND). 0 (default) disables the filter.
+
+.PARAMETER SmallerThan
+    Keep only sessions whose Size (KB) is below N. Useful for sweeping tiny,
+    abandoned sessions. 0 (default) disables the filter.
+
+.PARAMETER Unnamed
+    Keep only sessions with no custom /title. Combines with other selectors.
+
+.EXAMPLE
+    Get-ClaudeCodeSessions -OlderThan 30
+    Preview every session not touched in the last 30 days (read-only table).
+
+.EXAMPLE
+    Get-ClaudeCodeSessions -OlderThan 30 -Delete
+    Delete those same sessions, prompting before each one.
+
+.EXAMPLE
+    Get-ClaudeCodeSessions -SmallerThan 5 -Unnamed -Delete -Confirm:$false
+    Nuke tiny, never-titled sessions with no per-file prompt. Combine selectors
+    freely - they AND together.
+
+.EXAMPLE
+    Get-ClaudeCodeSessions -Search 'that embarrassing one' -Delete -WhatIf
+    Show what a search-scoped delete would remove, without removing anything.
+
 .EXAMPLE
     Get-ClaudeCodeSessions -Open 23 -Prompt 5
     Open session #23 from the table and show first/last 5 turns.
@@ -94,7 +130,7 @@
     Get-ClaudeCodeSessions | Where-Object Size -lt 5
     Tiny/abandoned sessions - cleanup candidates.
 #>
-[CmdletBinding(DefaultParameterSetName = 'Table')]
+[CmdletBinding(DefaultParameterSetName = 'Table', SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     [Parameter()]
     [string]$Search,
@@ -116,7 +152,88 @@ param(
 
     [switch]$NoColor,
 
+    [ArgumentCompleter({
+        param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
+
+        # Attaching ANY completer to -Open makes PowerShell hand this parameter's
+        # completion entirely to us, suppressing the default filesystem fallback
+        # that otherwise suggests files in the current directory. We offer session
+        # handles instead: custom titles first, then UUID filenames.
+
+        $root = Join-Path $env:USERPROFILE '.claude\projects'
+        if (-not (Test-Path -LiteralPath $root)) { return }
+
+        # PowerShell may include surrounding quotes in the word; strip them so a
+        # partially-typed quoted title still matches.
+        $word = $wordToComplete.Trim("'", '"')
+
+        # Decode an encoded project-dir name ('C--Users-foo') into a readable
+        # folder for the tooltip. Pure string work - no file reads.
+        $decode = {
+            param($n)
+            if ($n -match '^([A-Za-z])--(.+)$') { "$($matches[1]):\" + ($matches[2] -replace '-', '\') }
+            else { $n }
+        }
+
+        # Title lookups read whole transcripts, so cache them keyed by path and
+        # invalidate on LastWriteTime. The first Tab pays the scan; later presses
+        # are fast and self-refresh when a session changes.
+        if (-not $global:CCSessionTitleCache) { $global:CCSessionTitleCache = @{} }
+        $cache = $global:CCSessionTitleCache
+
+        $titleResults = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $fileResults  = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $seenTitles   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+        foreach ($dir in Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue) {
+            $folder = & $decode $dir.Name
+            foreach ($file in Get-ChildItem -LiteralPath $dir.FullName -Filter *.jsonl -File -ErrorAction SilentlyContinue) {
+
+                # Filename / UUID handle - instant, no file read.
+                $stem = $file.BaseName
+                if (-not $word -or $stem -like "*$word*") {
+                    $tip = '{0}  {1}' -f $folder, $file.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+                    $fileResults.Add([System.Management.Automation.CompletionResult]::new(
+                        $stem, $stem, 'ParameterValue', $tip))
+                }
+
+                # Custom title - cached. Last non-empty custom-title wins, mirroring
+                # the main script so a completed title actually resolves on -Open.
+                $entry = $cache[$file.FullName]
+                if (-not $entry -or $entry.Mtime -ne $file.LastWriteTimeUtc.Ticks) {
+                    $title = ''
+                    foreach ($h in (Select-String -LiteralPath $file.FullName -Pattern 'custom-title' -ErrorAction SilentlyContinue)) {
+                        try { $t = [string]($h.Line | ConvertFrom-Json -ErrorAction Stop).customTitle } catch { continue }
+                        if ($t) { $title = $t }
+                    }
+                    $entry = @{ Mtime = $file.LastWriteTimeUtc.Ticks; Title = $title }
+                    $cache[$file.FullName] = $entry
+                }
+
+                $title = $entry.Title
+                if ($title -and (-not $word -or $title -like "*$word*") -and $seenTitles.Add($title)) {
+                    $completion = if ($title -match '[\s'']') { "'" + ($title -replace "'", "''") + "'" } else { $title }
+                    $titleResults.Add([System.Management.Automation.CompletionResult]::new(
+                        $completion, $title, 'ParameterValue', "Session: $title  ($folder)"))
+                }
+            }
+        }
+
+        # Titles first (the memorable handles), then UUID filenames.
+        $out = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $out.AddRange($titleResults)
+        $out.AddRange($fileResults)
+        return $out
+    })]
     [string]$Open,
+
+    [switch]$Delete,
+
+    [int]$OlderThan = 0,
+
+    [int]$SmallerThan = 0,
+
+    [switch]$Unnamed,
 
     [switch]$Help
 )
@@ -184,6 +301,21 @@ ${Bold}PARAMETERS${Reset}
   ${Cyan}-Limit${Reset} <N>
       Cap the number of sessions returned. Default 0 (no limit).
 
+  ${Cyan}-OlderThan${Reset} <N>
+      Keep only sessions older than N days (by Modified). 0 disables.
+
+  ${Cyan}-SmallerThan${Reset} <N>
+      Keep only sessions under N KB. 0 disables.
+
+  ${Cyan}-Unnamed${Reset}
+      Keep only sessions with no custom /title.
+
+  ${Cyan}-Delete${Reset}
+      ${Bold}Permanently${Reset} delete the filtered set. Requires at least one selector
+      (-Search/-Open/-OlderThan/-SmallerThan/-Unnamed). Supports -WhatIf and
+      -Confirm; prompts per file unless you pass ${Dim}-Confirm:`$false${Reset}. Preview by
+      running the same command WITHOUT -Delete.
+
   ${Cyan}-IncludeSubagents${Reset}
       Include subagent transcripts (subagents/agent-*.jsonl). Off by default.
 
@@ -207,11 +339,11 @@ ${Bold}EXAMPLES${Reset}
   Get-ClaudeCodeSessions -Search "database migration"
   Get-ClaudeCodeSessions -Search "kiro" -Prompt 3
 
-  ${Dim}# Cleanup pipelines${Reset}
-  Get-ClaudeCodeSessions | Where-Object Size -lt 5
-  Get-ClaudeCodeSessions | Where-Object { -not `$_.Session }
-  Get-ClaudeCodeSessions | Where-Object Modified -lt (Get-Date).AddDays(-30) |
-      ForEach-Object { Remove-Item `$_.FullPath -WhatIf }
+  ${Dim}# Cleanup (preview first, then add -Delete)${Reset}
+  Get-ClaudeCodeSessions -OlderThan 30
+  Get-ClaudeCodeSessions -OlderThan 30 -Delete
+  Get-ClaudeCodeSessions -SmallerThan 5 -Unnamed -Delete -Confirm:`$false
+  Get-ClaudeCodeSessions -Search "scratch" -Delete -WhatIf
 
 ${Bold}NOTES${Reset}
   ${Dim}- Reads from %USERPROFILE%\.claude\projects. Read-only by default.${Reset}
@@ -221,6 +353,22 @@ ${Bold}NOTES${Reset}
 "@
     Write-Output $h
     return
+}
+
+# ---- Delete guard ----------------------------------------------------------
+
+# -Delete is destructive and operates on the *filtered* result set. Refuse to
+# run without at least one selector, so a bare `-Delete` can never wipe every
+# session in one "Yes to All". The per-file ShouldProcess prompt is the
+# seatbelt; this required-selector check is the actual guard rail.
+if ($Delete) {
+    $hasSelector = $Search -or $Open -or ($OlderThan -gt 0) -or ($SmallerThan -gt 0) -or $Unnamed
+    if (-not $hasSelector) {
+        Write-Error ("Refusing to delete without a selector. Narrow the set first with " +
+            "-Search, -Open, -OlderThan, -SmallerThan, or -Unnamed, then re-run with " +
+            "-Delete. Run the same command WITHOUT -Delete to preview the victims.")
+        return
+    }
 }
 
 # ---- Helpers ---------------------------------------------------------------
@@ -442,7 +590,56 @@ if ($Open) {
     $Sessions = @($matchedSessions)
 }
 
+# Narrowing selectors. These combine (logical AND) and apply AFTER index
+# assignment, so the Index column stays stable regardless of which filters are
+# active. They drive both the table preview and -Delete: eyeball the table,
+# then re-run the identical command with -Delete added.
+if ($OlderThan -gt 0) {
+    $cutoff   = (Get-Date).AddDays(-$OlderThan)
+    $Sessions = @($Sessions | Where-Object { $_.Modified -lt $cutoff })
+}
+if ($SmallerThan -gt 0) {
+    $Sessions = @($Sessions | Where-Object { $_.Size -lt $SmallerThan })
+}
+if ($Unnamed) {
+    $Sessions = @($Sessions | Where-Object { -not $_.Session })
+}
+
 if ($Limit -gt 0) { $Sessions = $Sessions | Select-Object -First $Limit }
+
+# ---- Delete ----------------------------------------------------------------
+
+# Runs against the fully filtered/limited set. SupportsShouldProcess gives us
+# -WhatIf and -Confirm for free; ConfirmImpact='High' means each file prompts
+# unless the caller passes -Confirm:$false. Deletion is permanent (Remove-Item),
+# so there is no Recycle Bin safety net - the prompt and the selector guard are.
+if ($Delete) {
+    if (@($Sessions).Count -eq 0) {
+        Write-Warning 'No sessions matched the given filters; nothing to delete.'
+        return
+    }
+
+    $deleted = 0
+    foreach ($s in $Sessions) {
+        $name   = if ($s.Session) { $s.Session } else { '(unnamed)' }
+        $target = "[{0}] {1}  {2}  {3}KB  {4}" -f $s.Index, $s.Folder, $name, $s.Size, $s.File
+        if ($PSCmdlet.ShouldProcess($target, 'Delete session transcript')) {
+            try {
+                Remove-Item -LiteralPath $s.FullPath -Force -ErrorAction Stop
+                $deleted++
+            } catch {
+                Write-Error "Failed to delete $($s.FullPath): $_"
+            }
+        }
+    }
+
+    if ($WhatIfPreference) {
+        Write-Output ("{0}-WhatIf: {1} session(s) would be deleted.{2}" -f $Cyan, @($Sessions).Count, $Reset)
+    } else {
+        Write-Output ("{0}Deleted {1} of {2} session(s).{3}" -f $Green, $deleted, @($Sessions).Count, $Reset)
+    }
+    return
+}
 
 # ---- Output ----------------------------------------------------------------
 
