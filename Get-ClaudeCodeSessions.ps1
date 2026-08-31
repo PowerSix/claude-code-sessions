@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Triage and search Claude Code session transcripts.
+    Triage, read and delete Claude Code session transcripts.
 
 .DESCRIPTION
     Lists or searches the .jsonl session transcripts Claude Code stores under
@@ -13,192 +13,172 @@
     The Folder value is read from the 'cwd' field inside the first user
     message in each session - the directory name is only a fallback.
 
-    With -Prompt / -PromptStart / -PromptEnd, the script switches from a
-    table view to a per-session block showing the requested conversation
-    turns in chronological order (with a gap marker between halves when
-    -Prompt skips the middle of a long session).
+    Three modes, one per verb:
+      (no selector)    table of every session, newest first within each folder
+      -Open <sel>      print that session's conversation
+      -Delete <sel>    permanently remove that session and everything it owns
+
+    WHY -Delete REMOVES MORE THAN THE .jsonl
+    A session is not one file.  Alongside the root <uuid>.jsonl it owns a
+    sidecar directory (subagents/ and tool-results/), a file-history/<uuid>
+    tree of edit snapshots, a session-env/<uuid> dir, a tasks/<uuid> dir, a
+    jobs/<first-8-hex> dir, and scratch under %TEMP%\claude.  Removing only
+    the transcript leaves all of that behind as unreachable garbage that
+    nothing on the system ever prunes.  -Delete therefore sweeps the whole
+    footprint.  It deliberately does NOT touch:
+
+      memory\        shared per PROJECT, not per session - deleting it would
+                     destroy MEMORY.md and every auto-memory file
+      history.jsonl  your typed prompts, keyed by sessionId, which survive
+                     the transcript and are the only record of sessions that
+                     Claude Code's own cleanupPeriodDays reaper has eaten
+      .claude.json   per-project config, trust flags and token counters
+      paste-cache\   keyed by content hash, so it cannot be attributed to a
+                     session at all
+
+    A session's sidecar can live under a DIFFERENT project directory than its
+    transcript, because the sidecar lands wherever the cwd was when the tool
+    ran.  Orphan detection is therefore GLOBAL: a sidecar is only removed once
+    no root transcript with that UUID remains in ANY project directory.
+
+    OneDrive note: if .claude\projects is redirected into OneDrive, Files-On-
+    Demand marks directories ReadOnly + ReparsePoint.  Deleting those fails
+    with access-denied until the attribute is stripped, which this script does.
 
 .PARAMETER Search
     Phrase to search for inside session transcripts. Case-insensitive,
     literal (not regex). Returns only sessions matching.
 
-.PARAMETER Prompt
-    Show the first N turns AND the last N turns of each session in
-    chronological order. If the session has 2N or fewer turns, all turns
-    are shown (no gap). Otherwise a gap marker reports how many turns
-    are omitted between the two halves.
-
-.PARAMETER PromptStart
-    Show only the first N turns of each session. Mutually exclusive
-    with -Prompt.
-
-.PARAMETER PromptEnd
-    Show only the last N turns of each session. Mutually exclusive
-    with -Prompt.
-
-.PARAMETER IncludeSubagents
-    Include subagent transcripts (subagents/agent-*.jsonl). Off by default.
-
-.PARAMETER Limit
-    Cap the number of sessions returned. 0 (default) means no limit.
-
-.PARAMETER PromptMaxChars
-    Truncate each turn's text to this many characters when displaying with
-    -Prompt/-PromptStart/-PromptEnd. Default 600. Use 0 for no truncation.
-
-.PARAMETER NoColor
-    Disable ANSI colors in -Prompt mode output.
-
 .PARAMETER Open
-    Pick a single session. Three forms:
+    Select one session and print its conversation. Three forms:
       - Integer:   matches the Index column from the table view
       - Substring: matches the filename (UUID fragment is fine)
       - Substring: matches the Session name (custom title set via /title)
-    Substring matches are case-insensitive and may return multiple sessions.
+    Substring matches are case-insensitive and may return several sessions,
+    in which case each is printed in turn.
 
-    Indexes are assigned after sorting and BEFORE -Limit/-Search filters,
-    so the numbers stay stable as long as no new session is added/removed.
+    Indexes are assigned after sorting and BEFORE the narrowing filters,
+    so the numbers stay stable as long as no session is added or removed.
 
     Note: this is named -Open instead of -File because pwsh.exe treats
     -File as its own script-launcher argument and would eat the value.
 
 .PARAMETER Delete
-    Permanently delete the sessions in the (filtered) result set. Refuses to
-    run without at least one selector (-Search, -Open, -OlderThan,
-    -SmallerThan, or -Unnamed) so a bare -Delete can never wipe everything.
-    Supports -WhatIf and -Confirm; prompts per file by default because the
-    deletion is permanent (no Recycle Bin). Preview by running the identical
-    command WITHOUT -Delete - the table shows exactly what would be removed.
+    Select sessions and permanently delete them, along with their sidecar,
+    file-history, session-env, tasks, jobs and %TEMP% data. Accepts the same
+    selector forms as -Open, plus '*' meaning "everything currently matched".
+
+    '*' requires at least one narrowing filter (-Search, -OlderThan,
+    -SmallerThan or -Unnamed) so it can never wipe every session at once.
+
+    The matched set is printed as a table and a single confirmation is
+    required: you must type 'yes'. Deletion is permanent, with no Recycle Bin.
+    Preview by running the same command with -Open instead.
+
+    Sessions that are currently running are always skipped, which also closes
+    the old footgun where searching for a phrase logged that phrase into the
+    live transcript and made it match itself.
+
+.PARAMETER Turns
+    With -Open, how many turns to print from each end of the conversation.
+    Default 10. Use 0 to print every turn. If the session has 2N or fewer
+    turns all of them are shown; otherwise a marker reports how many were
+    omitted from the middle.
+
+.PARAMETER MaxChars
+    Truncate each turn's text to this many characters. Default 600. Use 0
+    for no truncation.
 
 .PARAMETER OlderThan
     Keep only sessions whose Modified time is older than N days. Combines with
-    other selectors (logical AND). 0 (default) disables the filter.
+    the other filters (logical AND). 0 (default) disables the filter.
 
 .PARAMETER SmallerThan
     Keep only sessions whose Size (KB) is below N. Useful for sweeping tiny,
     abandoned sessions. 0 (default) disables the filter.
 
 .PARAMETER Unnamed
-    Keep only sessions with no custom /title. Combines with other selectors.
+    Keep only sessions with no custom /title. Combines with the other filters.
 
-.EXAMPLE
-    Get-ClaudeCodeSessions -OlderThan 30
-    Preview every session not touched in the last 30 days (read-only table).
+.PARAMETER Limit
+    Cap the number of sessions returned. 0 (default) means no limit.
 
-.EXAMPLE
-    Get-ClaudeCodeSessions -OlderThan 30 -Delete
-    Delete those same sessions, prompting before each one.
+.PARAMETER IncludeSubagents
+    Include subagent transcripts (<uuid>/subagents/agent-*.jsonl) as rows in
+    their own right. Off by default.
 
-.EXAMPLE
-    Get-ClaudeCodeSessions -SmallerThan 5 -Unnamed -Delete -Confirm:$false
-    Nuke tiny, never-titled sessions with no per-file prompt. Combine selectors
-    freely - they AND together.
+.PARAMETER NoColor
+    Disable ANSI colors. Useful when piping to a file.
 
-.EXAMPLE
-    Get-ClaudeCodeSessions -Search 'that embarrassing one' -Delete -WhatIf
-    Show what a search-scoped delete would remove, without removing anything.
-
-.EXAMPLE
-    Get-ClaudeCodeSessions -Open 23 -Prompt 5
-    Open session #23 from the table and show first/last 5 turns.
-
-.EXAMPLE
-    Get-ClaudeCodeSessions -Open de8f46e2 -PromptStart 10
-    Open the session whose filename contains 'de8f46e2'.
-
-.EXAMPLE
-    Get-ClaudeCodeSessions -Open my-app -PromptEnd 20
-    Open every session named (custom title) 'my-app', last 20 turns each.
+.PARAMETER Help
+    Show a short colored reference and exit.
 
 .EXAMPLE
     Get-ClaudeCodeSessions
-    Table view of every session across every project, newest first.
+    Table view of every session across every project.
+
+.EXAMPLE
+    Get-ClaudeCodeSessions -Open 23
+    Print session #23 from the table, first and last 10 turns.
+
+.EXAMPLE
+    Get-ClaudeCodeSessions -Open de8f46e2 -Turns 0
+    Print the whole conversation for the session whose filename contains
+    'de8f46e2'.
+
+.EXAMPLE
+    Get-ClaudeCodeSessions -Delete 23
+    Delete session #23 and everything it owns, after one confirmation.
+
+.EXAMPLE
+    Get-ClaudeCodeSessions -Delete delete
+    Delete every session whose title contains 'delete' - the tombstone
+    workflow: rename a session '/title delete' when you are done with it,
+    then sweep them all later.
+
+.EXAMPLE
+    Get-ClaudeCodeSessions -OlderThan 90 -SmallerThan 5 -Delete *
+    Sweep tiny sessions untouched for 90 days. Run it without -Delete first
+    to see exactly what would go.
 
 .EXAMPLE
     Get-ClaudeCodeSessions -Search 'database migration'
     Find sessions in any project folder mentioning the phrase.
 
 .EXAMPLE
-    Get-ClaudeCodeSessions -Search 'kiro' -Prompt 3
-    Show first 3 turns and last 3 turns of every match.
-
-.EXAMPLE
-    Get-ClaudeCodeSessions -PromptStart 2 -Limit 5
-    For the 5 newest sessions, show the first two turns of each.
-
-.EXAMPLE
     Get-ClaudeCodeSessions | Where-Object Size -lt 5
-    Tiny/abandoned sessions - cleanup candidates.
+    Tiny or abandoned sessions - cleanup candidates.
 #>
-[CmdletBinding(DefaultParameterSetName = 'Table', SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+[CmdletBinding()]
 param(
     [Parameter()]
     [string]$Search,
 
-    [Parameter(ParameterSetName = 'Prompt')]
-    [int]$Prompt,
-
-    [Parameter(ParameterSetName = 'PromptStart')]
-    [int]$PromptStart,
-
-    [Parameter(ParameterSetName = 'PromptEnd')]
-    [int]$PromptEnd,
-
-    [switch]$IncludeSubagents,
-
-    [int]$Limit = 0,
-
-    [int]$PromptMaxChars = 600,
-
-    [switch]$NoColor,
-
     [ArgumentCompleter({
         param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
 
-        # Attaching ANY completer to -Open makes PowerShell hand this parameter's
-        # completion entirely to us, suppressing the default filesystem fallback
-        # that otherwise suggests files in the current directory. We offer session
-        # handles instead: custom titles first, then UUID filenames.
-
+        # Attaching ANY completer to this parameter makes PowerShell hand its
+        # completion entirely to us, suppressing the default filesystem
+        # fallback that otherwise suggests files in the current directory. We
+        # offer session handles instead: custom titles first, then UUIDs.
         $root = Join-Path $env:USERPROFILE '.claude\projects'
         if (-not (Test-Path -LiteralPath $root)) { return }
-
-        # PowerShell may include surrounding quotes in the word; strip them so a
-        # partially-typed quoted title still matches.
         $word = $wordToComplete.Trim("'", '"')
-
-        # Decode an encoded project-dir name ('C--Users-foo') into a readable
-        # folder for the tooltip. Pure string work - no file reads.
-        $decode = {
-            param($n)
-            if ($n -match '^([A-Za-z])--(.+)$') { "$($matches[1]):\" + ($matches[2] -replace '-', '\') }
-            else { $n }
-        }
-
-        # Title lookups read whole transcripts, so cache them keyed by path and
-        # invalidate on LastWriteTime. The first Tab pays the scan; later presses
-        # are fast and self-refresh when a session changes.
         if (-not $global:CCSessionTitleCache) { $global:CCSessionTitleCache = @{} }
         $cache = $global:CCSessionTitleCache
-
-        $titleResults = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
-        $fileResults  = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
-        $seenTitles   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-
+        $titles = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $files  = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $seen   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($dir in Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue) {
-            $folder = & $decode $dir.Name
+            $folder = if ($dir.Name -match '^([A-Za-z])--(.+)$') { "$($matches[1]):\" + ($matches[2] -replace '-', '\') } else { $dir.Name }
             foreach ($file in Get-ChildItem -LiteralPath $dir.FullName -Filter *.jsonl -File -ErrorAction SilentlyContinue) {
-
-                # Filename / UUID handle - instant, no file read.
                 $stem = $file.BaseName
                 if (-not $word -or $stem -like "*$word*") {
-                    $tip = '{0}  {1}' -f $folder, $file.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
-                    $fileResults.Add([System.Management.Automation.CompletionResult]::new(
-                        $stem, $stem, 'ParameterValue', $tip))
+                    $files.Add([System.Management.Automation.CompletionResult]::new(
+                        $stem, $stem, 'ParameterValue', ('{0}  {1}' -f $folder, $file.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))))
                 }
-
-                # Custom title - cached. Last non-empty custom-title wins, mirroring
-                # the main script so a completed title actually resolves on -Open.
+                # Title lookups read whole transcripts, so cache them keyed by
+                # path and invalidate on LastWriteTime.
                 $entry = $cache[$file.FullName]
                 if (-not $entry -or $entry.Mtime -ne $file.LastWriteTimeUtc.Ticks) {
                     $title = ''
@@ -209,25 +189,69 @@ param(
                     $entry = @{ Mtime = $file.LastWriteTimeUtc.Ticks; Title = $title }
                     $cache[$file.FullName] = $entry
                 }
-
                 $title = $entry.Title
-                if ($title -and (-not $word -or $title -like "*$word*") -and $seenTitles.Add($title)) {
+                if ($title -and (-not $word -or $title -like "*$word*") -and $seen.Add($title)) {
                     $completion = if ($title -match '[\s'']') { "'" + ($title -replace "'", "''") + "'" } else { $title }
-                    $titleResults.Add([System.Management.Automation.CompletionResult]::new(
+                    $titles.Add([System.Management.Automation.CompletionResult]::new(
                         $completion, $title, 'ParameterValue', "Session: $title  ($folder)"))
                 }
             }
         }
-
-        # Titles first (the memorable handles), then UUID filenames.
         $out = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
-        $out.AddRange($titleResults)
-        $out.AddRange($fileResults)
+        $out.AddRange($titles); $out.AddRange($files)
         return $out
     })]
     [string]$Open,
 
-    [switch]$Delete,
+    [ArgumentCompleter({
+        param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
+
+        # Same completer as -Open. Duplicated rather than shared because a
+        # script's param() block must be its first statement, so there is
+        # nowhere earlier to define a shared completer class or function.
+        $root = Join-Path $env:USERPROFILE '.claude\projects'
+        if (-not (Test-Path -LiteralPath $root)) { return }
+        $word = $wordToComplete.Trim("'", '"')
+        if (-not $global:CCSessionTitleCache) { $global:CCSessionTitleCache = @{} }
+        $cache = $global:CCSessionTitleCache
+        $titles = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $files  = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $seen   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($dir in Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue) {
+            $folder = if ($dir.Name -match '^([A-Za-z])--(.+)$') { "$($matches[1]):\" + ($matches[2] -replace '-', '\') } else { $dir.Name }
+            foreach ($file in Get-ChildItem -LiteralPath $dir.FullName -Filter *.jsonl -File -ErrorAction SilentlyContinue) {
+                $stem = $file.BaseName
+                if (-not $word -or $stem -like "*$word*") {
+                    $files.Add([System.Management.Automation.CompletionResult]::new(
+                        $stem, $stem, 'ParameterValue', ('{0}  {1}' -f $folder, $file.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))))
+                }
+                $entry = $cache[$file.FullName]
+                if (-not $entry -or $entry.Mtime -ne $file.LastWriteTimeUtc.Ticks) {
+                    $title = ''
+                    foreach ($h in (Select-String -LiteralPath $file.FullName -Pattern 'custom-title' -ErrorAction SilentlyContinue)) {
+                        try { $t = [string]($h.Line | ConvertFrom-Json -ErrorAction Stop).customTitle } catch { continue }
+                        if ($t) { $title = $t }
+                    }
+                    $entry = @{ Mtime = $file.LastWriteTimeUtc.Ticks; Title = $title }
+                    $cache[$file.FullName] = $entry
+                }
+                $title = $entry.Title
+                if ($title -and (-not $word -or $title -like "*$word*") -and $seen.Add($title)) {
+                    $completion = if ($title -match '[\s'']') { "'" + ($title -replace "'", "''") + "'" } else { $title }
+                    $titles.Add([System.Management.Automation.CompletionResult]::new(
+                        $completion, $title, 'ParameterValue', "Session: $title  ($folder)"))
+                }
+            }
+        }
+        $out = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $out.AddRange($titles); $out.AddRange($files)
+        return $out
+    })]
+    [string]$Delete,
+
+    [int]$Turns = 10,
+
+    [int]$MaxChars = 600,
 
     [int]$OlderThan = 0,
 
@@ -235,10 +259,17 @@ param(
 
     [switch]$Unnamed,
 
+    [int]$Limit = 0,
+
+    [switch]$IncludeSubagents,
+
+    [switch]$NoColor,
+
     [switch]$Help
 )
 
 $ProjectsRoot = Join-Path $env:USERPROFILE '.claude\projects'
+$ClaudeRoot   = Join-Path $env:USERPROFILE '.claude'
 $UserHome     = $env:USERPROFILE
 
 if (-not (Test-Path $ProjectsRoot)) {
@@ -246,14 +277,15 @@ if (-not (Test-Path $ProjectsRoot)) {
     return
 }
 
-$Esc    = [char]27
+$Esc = [char]27
 if ($NoColor) {
-    $Green = ''; $Blue = ''; $Yellow = ''; $Cyan = ''; $Bold = ''; $Dim = ''; $Reset = ''
+    $Green = ''; $Blue = ''; $Yellow = ''; $Cyan = ''; $Red = ''; $Bold = ''; $Dim = ''; $Reset = ''
 } else {
     $Green  = "$Esc[32m"
     $Blue   = "$Esc[94m"
     $Yellow = "$Esc[33m"
     $Cyan   = "$Esc[36m"
+    $Red    = "$Esc[31m"
     $Bold   = "$Esc[1m"
     $Dim    = "$Esc[2m"
     $Reset  = "$Esc[0m"
@@ -263,112 +295,72 @@ if ($NoColor) {
 
 if ($Help) {
     $h = @"
-${Bold}${Green}Get-ClaudeCodeSessions${Reset} - Browse and triage Claude Code session transcripts.
+${Bold}${Green}Get-ClaudeCodeSessions${Reset} - Browse, read and delete Claude Code session transcripts.
 
-${Bold}USAGE${Reset}
-  Get-ClaudeCodeSessions [parameters]
+${Bold}THREE MODES${Reset}
+  ${Cyan}Get-ClaudeCodeSessions${Reset}                 list every session as a table
+  ${Cyan}Get-ClaudeCodeSessions -Open${Reset} <sel>     print that session's conversation
+  ${Cyan}Get-ClaudeCodeSessions -Delete${Reset} <sel>   delete it and everything it owns
 
-${Bold}DEFAULT (no parameters)${Reset}
-  Lists every session across every project as a table sorted by Folder, then
-  by Modified (newest first within each folder).
+${Bold}SELECTORS${Reset} (for -Open and -Delete)
+  ${Cyan}23${Reset}          the Index column from the table
+  ${Cyan}de8f46e2${Reset}    a fragment of the filename / UUID
+  ${Cyan}my-app${Reset}      a fragment of the Session name (set with /title)
+  ${Cyan}*${Reset}           everything currently matched (-Delete only, and it
+              refuses to run unless a filter narrows the set first)
 
-${Bold}PARAMETERS${Reset}
-  ${Cyan}-Open${Reset} <int|substring>
-      Pick a single session and switch to header-block view.
-        - Integer:   matches the Index column from the table
-        - Substring: matches the filename (UUID fragment OK)
-        - Substring: matches the Session name (custom title set via /title)
-      Substring match is case-insensitive and may return multiple sessions.
+${Bold}FILTERS${Reset} (combine freely, they AND together)
+  ${Cyan}-Search${Reset} <string>     literal, case-insensitive search inside transcripts
+  ${Cyan}-OlderThan${Reset} <N>       only sessions older than N days
+  ${Cyan}-SmallerThan${Reset} <N>     only sessions under N KB
+  ${Cyan}-Unnamed${Reset}             only sessions with no custom /title
+  ${Cyan}-Limit${Reset} <N>           cap the number of rows
 
-  ${Cyan}-Search${Reset} <string>
-      Case-insensitive literal search inside transcripts. Filters the result
-      set to sessions whose JSONL contains the phrase.
+${Bold}READING${Reset}
+  ${Cyan}-Turns${Reset} <N>           turns from each end of the conversation (default 10,
+                        0 = all). A ${Dim}... [X turns omitted] ...${Reset} marker shows the gap.
+  ${Cyan}-MaxChars${Reset} <N>        truncate each turn to N chars (default 600, 0 = full)
 
-  ${Cyan}-Prompt${Reset} <N>
-      Show the first N turns AND the last N turns of each session in
-      chronological order. If the session has more than 2N turns, a
-      ${Dim}... [X turns omitted] ...${Reset} marker appears between the halves.
+${Bold}OTHER${Reset}
+  ${Cyan}-IncludeSubagents${Reset}    also list subagent transcripts as their own rows
+  ${Cyan}-NoColor${Reset}             strip ANSI colors
+  ${Cyan}-Help${Reset}                this screen
 
-  ${Cyan}-PromptStart${Reset} <N>
-      Show only the first N turns. Mutually exclusive with -Prompt.
+${Bold}WHAT -Delete ACTUALLY REMOVES${Reset}
+  A session is not one file. -Delete sweeps the whole footprint:
+    ${Dim}projects\<proj>\<uuid>.jsonl        the transcript${Reset}
+    ${Dim}projects\*\<uuid>\                 sidecar: subagents\ + tool-results\${Reset}
+    ${Dim}file-history\<uuid>\               edit snapshots (often the biggest part)${Reset}
+    ${Dim}session-env\<uuid>\  tasks\<uuid>\  jobs\<first8>\${Reset}
+    ${Dim}%TEMP%\claude\*\<uuid>\            background task scratch${Reset}
+  It never touches ${Bold}memory\${Reset} (shared per project), ${Bold}history.jsonl${Reset} (your typed
+  prompts, which outlive the transcript), ${Bold}.claude.json${Reset} or ${Bold}paste-cache\${Reset}.
 
-  ${Cyan}-PromptEnd${Reset} <N>
-      Show only the last N turns. Mutually exclusive with -Prompt.
-
-  ${Cyan}-PromptMaxChars${Reset} <N>
-      Truncate each turn's text to N chars. Default 600. Use 0 for full text.
-
-  ${Cyan}-Limit${Reset} <N>
-      Cap the number of sessions returned. Default 0 (no limit).
-
-  ${Cyan}-OlderThan${Reset} <N>
-      Keep only sessions older than N days (by Modified). 0 disables.
-
-  ${Cyan}-SmallerThan${Reset} <N>
-      Keep only sessions under N KB. 0 disables.
-
-  ${Cyan}-Unnamed${Reset}
-      Keep only sessions with no custom /title.
-
-  ${Cyan}-Delete${Reset}
-      ${Bold}Permanently${Reset} delete the filtered set. Requires at least one selector
-      (-Search/-Open/-OlderThan/-SmallerThan/-Unnamed). Supports -WhatIf and
-      -Confirm; prompts per file unless you pass ${Dim}-Confirm:`$false${Reset}. Preview by
-      running the same command WITHOUT -Delete.
-
-  ${Cyan}-IncludeSubagents${Reset}
-      Include subagent transcripts (subagents/agent-*.jsonl). Off by default.
-
-  ${Cyan}-NoColor${Reset}
-      Disable ANSI colors. Useful when piping to a file.
-
-  ${Cyan}-Help${Reset}
-      Show this reference and exit.
+${Bold}SAFETY${Reset}
+  ${Dim}- The matched set is printed, then ONE confirmation asks you to type 'yes'.${Reset}
+  ${Dim}- Deletion is permanent: there is no Recycle Bin.${Reset}
+  ${Dim}- Running sessions are always skipped, so it cannot delete itself.${Reset}
+  ${Dim}- A sidecar is removed only once no transcript with that UUID exists in ANY${Reset}
+  ${Dim}  project dir, because a sidecar can outlive a cwd change.${Reset}
+  ${Dim}- Preview any delete by running the same command with -Open instead.${Reset}
 
 ${Bold}EXAMPLES${Reset}
-  ${Dim}# Browse${Reset}
   Get-ClaudeCodeSessions
-  Get-ClaudeCodeSessions -Limit 20
-
-  ${Dim}# Open by index, UUID, or Session name${Reset}
-  Get-ClaudeCodeSessions -Open 23 -Prompt 5
-  Get-ClaudeCodeSessions -Open de8f46e2 -PromptStart 10
-  Get-ClaudeCodeSessions -Open my-app -PromptEnd 20
-
-  ${Dim}# Search transcripts${Reset}
+  Get-ClaudeCodeSessions -Open 23
+  Get-ClaudeCodeSessions -Open de8f46e2 -Turns 0
   Get-ClaudeCodeSessions -Search "database migration"
-  Get-ClaudeCodeSessions -Search "kiro" -Prompt 3
-
-  ${Dim}# Cleanup (preview first, then add -Delete)${Reset}
-  Get-ClaudeCodeSessions -OlderThan 30
-  Get-ClaudeCodeSessions -OlderThan 30 -Delete
-  Get-ClaudeCodeSessions -SmallerThan 5 -Unnamed -Delete -Confirm:`$false
-  Get-ClaudeCodeSessions -Search "scratch" -Delete -WhatIf
-
-${Bold}NOTES${Reset}
-  ${Dim}- Reads from %USERPROFILE%\.claude\projects. Read-only by default.${Reset}
-  ${Dim}- Indexes are stable until a session is added or removed.${Reset}
-  ${Dim}- Custom session titles come from /title in Claude Code.${Reset}
-  ${Dim}- Run Get-Help Get-ClaudeCodeSessions.ps1 -Detailed for the full doc.${Reset}
+  Get-ClaudeCodeSessions -Delete 23
+  Get-ClaudeCodeSessions -Delete delete
+  Get-ClaudeCodeSessions -OlderThan 90 -SmallerThan 5 -Delete *
 "@
     Write-Output $h
     return
 }
 
-# ---- Delete guard ----------------------------------------------------------
-
-# -Delete is destructive and operates on the *filtered* result set. Refuse to
-# run without at least one selector, so a bare `-Delete` can never wipe every
-# session in one "Yes to All". The per-file ShouldProcess prompt is the
-# seatbelt; this required-selector check is the actual guard rail.
-if ($Delete) {
-    $hasSelector = $Search -or $Open -or ($OlderThan -gt 0) -or ($SmallerThan -gt 0) -or $Unnamed
-    if (-not $hasSelector) {
-        Write-Error ("Refusing to delete without a selector. Narrow the set first with " +
-            "-Search, -Open, -OlderThan, -SmallerThan, or -Unnamed, then re-run with " +
-            "-Delete. Run the same command WITHOUT -Delete to preview the victims.")
-        return
-    }
+if ($Open -and $Delete) {
+    Write-Error 'Use -Open to read a session or -Delete to remove one, not both.'
+    Write-Host ''
+    return
 }
 
 # ---- Helpers ---------------------------------------------------------------
@@ -400,11 +392,14 @@ function Get-SessionData {
     # changed; we keep the LAST one we see.
     param([string]$JsonlPath)
 
-    $turns = New-Object System.Collections.Generic.List[object]
+    # Named $turnList, not $turns: the -Turns parameter is [int] and PowerShell
+    # variable names are case-insensitive, so a local $turns would collide with
+    # it and fail to accept a List.
+    $turnList = New-Object System.Collections.Generic.List[object]
     $customTitle = ''
 
     if ([string]::IsNullOrWhiteSpace($JsonlPath)) {
-        return @{ Turns = $turns; CustomTitle = $customTitle }
+        return @{ Turns = $turnList; CustomTitle = $customTitle }
     }
 
     foreach ($line in Get-Content -LiteralPath $JsonlPath -ErrorAction SilentlyContinue) {
@@ -425,7 +420,7 @@ function Get-SessionData {
         $text = Get-MessageText $obj.message.content
         if (-not $text) { continue }
 
-        $turns.Add([PSCustomObject]@{
+        $turnList.Add([PSCustomObject]@{
             Role      = $role
             Text      = $text
             Cwd       = $obj.cwd
@@ -433,7 +428,7 @@ function Get-SessionData {
         })
     }
 
-    return @{ Turns = $turns; CustomTitle = $customTitle }
+    return @{ Turns = $turnList; CustomTitle = $customTitle }
 }
 
 function ConvertTo-FolderLabel {
@@ -478,50 +473,138 @@ function Format-TurnText {
 }
 
 function Select-TurnsForDisplay {
-    param(
-        [System.Collections.Generic.List[object]]$Turns,
-        [string]$Mode,
-        [int]$N
-    )
-    $total = if ($Turns) { $Turns.Count } else { 0 }
-    $result = @{ First = @(); Last = @(); Omitted = 0; Total = $total }
-
-    if ($total -eq 0 -or $N -le 0) { return $result }
-
-    switch ($Mode) {
-        'Start' {
-            $result.First   = @($Turns | Select-Object -First $N)
-            $result.Omitted = [Math]::Max(0, $total - $N)
-        }
-        'End' {
-            $result.Last    = @($Turns | Select-Object -Last $N)
-            $result.Omitted = [Math]::Max(0, $total - $N)
-        }
-        'Both' {
-            if ($total -le ($N * 2)) {
-                $result.First   = @($Turns)
-                $result.Omitted = 0
-            } else {
-                $result.First   = @($Turns | Select-Object -First $N)
-                $result.Last    = @($Turns | Select-Object -Last $N)
-                $result.Omitted = $total - ($N * 2)
-            }
-        }
+    param([object]$SessionTurns, [int]$N)
+    # Do NOT use @($SessionTurns) here. On PowerShell 7.6.5 the array
+    # subexpression operator throws "Argument types do not match" when applied
+    # to a System.Collections.Generic.List[object], which is exactly what
+    # Get-SessionData returns. [object[]] casts fine; so would .ToArray().
+    $list = @()
+    if ($null -ne $SessionTurns) { $list = [object[]]$SessionTurns }
+    $total = $list.Count
+    if ($total -eq 0) { return @{ First = @(); Last = @(); Omitted = 0; Total = 0 } }
+    if ($N -le 0 -or $total -le ($N * 2)) {
+        return @{ First = $list; Last = @(); Omitted = 0; Total = $total }
     }
-    return $result
+    return @{
+        First   = @($list | Select-Object -First $N)
+        Last    = @($list | Select-Object -Last $N)
+        Omitted = $total - ($N * 2)
+        Total   = $total
+    }
 }
 
 function Write-TurnBlock {
-    param($Turn, [int]$MaxChars)
+    param($Turn, [int]$Max)
     if ($Turn.Role -eq 'user') {
         $color = $Blue;   $label = '[USER]'
     } else {
         $color = $Yellow; $label = '[CLAUDE]'
     }
-    $ts = Format-Timestamp $Turn.Timestamp
-    Write-Output ("{0}{1} {2}{3}" -f $color, $label, $ts, $Reset)
-    Write-Output (Format-TurnText -Text $Turn.Text -Max $MaxChars)
+    Write-Output ("{0}{1} {2}{3}" -f $color, $label, (Format-Timestamp $Turn.Timestamp), $Reset)
+    Write-Output (Format-TurnText -Text $Turn.Text -Max $Max)
     Write-Output ''
+}
+
+function Select-BySelector {
+    # Shared matching for -Open and -Delete: index, or substring of filename
+    # or custom title. '*' means "the whole current set".
+    param([object]$Candidates, [string]$Selector)
+    # [object[]] rather than @() - see the note in Select-TurnsForDisplay.
+    $list = @()
+    if ($null -ne $Candidates) { $list = [object[]]$Candidates }
+    if ($Selector -eq '*') { return $list }
+    if ($Selector -match '^#?\d+$') {
+        $idx = [int]($Selector.TrimStart('#'))
+        return @($list | Where-Object { $_.Index -eq $idx })
+    }
+    return @($list | Where-Object { $_.File -like "*$Selector*" -or $_.Session -like "*$Selector*" })
+}
+
+function Get-RunningSessionId {
+    # ~\.claude\sessions\<pid>.json maps a live process to its sessionId. Only
+    # trust an entry whose pid is still alive, otherwise a crashed session
+    # would be protected forever. CLAUDE_CODE_SESSION_ID covers the case where
+    # this script is run from inside a session's own shell.
+    $ids = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    if ($env:CLAUDE_CODE_SESSION_ID) { [void]$ids.Add($env:CLAUDE_CODE_SESSION_ID) }
+    $dir = Join-Path $ClaudeRoot 'sessions'
+    if (Test-Path -LiteralPath $dir) {
+        foreach ($f in Get-ChildItem -LiteralPath $dir -Filter *.json -File -ErrorAction SilentlyContinue) {
+            try { $o = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            if (-not $o.sessionId) { continue }
+            if ($o.pid -and -not (Get-Process -Id $o.pid -ErrorAction SilentlyContinue)) { continue }
+            [void]$ids.Add([string]$o.sessionId)
+        }
+    }
+    return $ids
+}
+
+function Remove-PathHard {
+    # OneDrive Files-On-Demand marks synced directories ReadOnly +
+    # ReparsePoint. Directory.Delete and Remove-Item both fail on those with
+    # access-denied until ReadOnly is cleared, so clear it first, depth-first.
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($item.PSIsContainer) {
+            foreach ($child in Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue) {
+                try { $child.Attributes = $child.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly) } catch { }
+            }
+            try { $item.Attributes = $item.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly) } catch { }
+            [System.IO.Directory]::Delete($Path, $true)
+        } else {
+            try { $item.Attributes = [System.IO.FileAttributes]::Normal } catch { }
+            [System.IO.File]::Delete($Path)
+        }
+    } catch {
+        return $false
+    }
+    return (-not (Test-Path -LiteralPath $Path))
+}
+
+function Get-PathSizeKB {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return 0 }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item.PSIsContainer) { return [int][math]::Round($item.Length / 1KB) }
+    $files = @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue)
+    if (-not $files.Count) { return 0 }
+    return [int][math]::Round((($files | Measure-Object Length -Sum).Sum) / 1KB)
+}
+
+function Get-SessionFootprint {
+    # Everything a session owns EXCEPT its root transcript, which the caller
+    # deletes first. Sidecar dirs are searched across every project dir, since
+    # a sidecar lands wherever the cwd was when the tool ran and can end up
+    # separated from its transcript.
+    param([string]$Uuid)
+
+    $paths = New-Object System.Collections.Generic.List[string]
+
+    foreach ($dir in Get-ChildItem -LiteralPath $ProjectsRoot -Directory -ErrorAction SilentlyContinue) {
+        $sidecar = Join-Path $dir.FullName $Uuid
+        if (Test-Path -LiteralPath $sidecar) { $paths.Add($sidecar) }
+    }
+    foreach ($sub in @('file-history', 'session-env', 'tasks')) {
+        $p = Join-Path (Join-Path $ClaudeRoot $sub) $Uuid
+        if (Test-Path -LiteralPath $p) { $paths.Add($p) }
+    }
+    # jobs\ is keyed by the first 8 hex chars of the session id, inferred from
+    # observed pairings. Guard against a prefix collision with a live session.
+    if ($Uuid.Length -ge 8) {
+        $prefix = $Uuid.Substring(0, 8)
+        $jobDir = Join-Path (Join-Path $ClaudeRoot 'jobs') $prefix
+        if (Test-Path -LiteralPath $jobDir) { $paths.Add($jobDir) }
+    }
+    $tempRoot = Join-Path $env:LOCALAPPDATA 'Temp\claude'
+    if (Test-Path -LiteralPath $tempRoot) {
+        foreach ($pd in Get-ChildItem -LiteralPath $tempRoot -Directory -ErrorAction SilentlyContinue) {
+            $p = Join-Path $pd.FullName $Uuid
+            if (Test-Path -LiteralPath $p) { $paths.Add($p) }
+        }
+    }
+    return $paths
 }
 
 # ---- Scan ------------------------------------------------------------------
@@ -543,57 +626,35 @@ foreach ($dir in $ProjectDirs) {
             if (-not $hit) { continue }
         }
 
-        $data   = Get-SessionData -JsonlPath $file.FullName
-        $turns  = $data.Turns
-        $cwd    = ($turns | Where-Object Cwd | Select-Object -First 1).Cwd
-        $folder = ConvertTo-FolderLabel -Cwd $cwd -DirName $dir.Name
+        $data    = Get-SessionData -JsonlPath $file.FullName
+        $sTurns  = $data.Turns
+        $cwd     = ($sTurns | Where-Object Cwd | Select-Object -First 1).Cwd
+        $folder  = ConvertTo-FolderLabel -Cwd $cwd -DirName $dir.Name
 
-        $size = [int][math]::Round($file.Length / 1KB)
-
-        $session = [PSCustomObject]@{
+        $Sessions.Add([PSCustomObject]@{
             Folder   = $folder
             Session  = $data.CustomTitle
             File     = $file.Name
             Modified = $file.LastWriteTime
-            Size     = $size
+            Size     = [int][math]::Round($file.Length / 1KB)
             FullPath = $file.FullName
-            Turns    = $turns
-        }
-        $Sessions.Add($session)
+            Turns    = $sTurns
+        })
     }
 }
 
-$Sessions = $Sessions | Sort-Object Folder, @{ Expression = 'Modified'; Descending = $true }
+$Sessions = @($Sessions | Sort-Object Folder, @{ Expression = 'Modified'; Descending = $true })
 
-# Assign stable indexes BEFORE filtering by -File or applying -Limit, so the
-# numbers shown by an earlier `Get-ClaudeCodeSessions` call still resolve.
+# Assign stable indexes BEFORE the selectors and filters run, so the numbers
+# printed by an earlier bare `Get-ClaudeCodeSessions` still resolve.
 $i = 1
 foreach ($s in $Sessions) {
     $s | Add-Member -NotePropertyName 'Index' -NotePropertyValue $i -Force
     $i++
 }
 
-if ($Open) {
-    $matchedSessions = if ($Open -match '^\d+$') {
-        $idx = [int]$Open
-        $Sessions | Where-Object { $_.Index -eq $idx }
-    } else {
-        $needle = $Open
-        $Sessions | Where-Object {
-            $_.File -like "*$needle*" -or $_.Session -like "*$needle*"
-        }
-    }
-    if (-not $matchedSessions -or @($matchedSessions).Count -eq 0) {
-        Write-Error "No session matched -Open '$Open'."
-        return
-    }
-    $Sessions = @($matchedSessions)
-}
-
-# Narrowing selectors. These combine (logical AND) and apply AFTER index
-# assignment, so the Index column stays stable regardless of which filters are
-# active. They drive both the table preview and -Delete: eyeball the table,
-# then re-run the identical command with -Delete added.
+# Narrowing filters. These combine (logical AND) and apply AFTER index
+# assignment, so the Index column stays stable regardless of which are active.
 if ($OlderThan -gt 0) {
     $cutoff   = (Get-Date).AddDays(-$OlderThan)
     $Sessions = @($Sessions | Where-Object { $_.Modified -lt $cutoff })
@@ -604,109 +665,235 @@ if ($SmallerThan -gt 0) {
 if ($Unnamed) {
     $Sessions = @($Sessions | Where-Object { -not $_.Session })
 }
+if ($Limit -gt 0) {
+    $Sessions = @($Sessions | Select-Object -First $Limit)
+}
 
-if ($Limit -gt 0) { $Sessions = $Sessions | Select-Object -First $Limit }
+$HasFilter = [bool]$Search -or ($OlderThan -gt 0) -or ($SmallerThan -gt 0) -or $Unnamed
 
 # ---- Delete ----------------------------------------------------------------
 
-# Runs against the fully filtered/limited set. SupportsShouldProcess gives us
-# -WhatIf and -Confirm for free; ConfirmImpact='High' means each file prompts
-# unless the caller passes -Confirm:$false. Deletion is permanent (Remove-Item),
-# so there is no Recycle Bin safety net - the prompt and the selector guard are.
 if ($Delete) {
-    if (@($Sessions).Count -eq 0) {
-        Write-Warning 'No sessions matched the given filters; nothing to delete.'
+    if ($Delete -eq '*' -and -not $HasFilter) {
+        Write-Error ("Refusing to delete every session. '-Delete *' needs a filter first: " +
+            "-Search, -OlderThan, -SmallerThan or -Unnamed. Run the same command with " +
+            "-Open instead to preview, or name a single session: -Delete <index|uuid|title>.")
+        Write-Host ''
         return
     }
 
-    $deleted = 0
-    foreach ($s in $Sessions) {
-        $name   = if ($s.Session) { $s.Session } else { '(unnamed)' }
-        $target = "[{0}] {1}  {2}  {3}KB  {4}" -f $s.Index, $s.Folder, $name, $s.Size, $s.File
-        if ($PSCmdlet.ShouldProcess($target, 'Delete session transcript')) {
-            try {
-                Remove-Item -LiteralPath $s.FullPath -Force -ErrorAction Stop
-                $deleted++
-            } catch {
-                Write-Error "Failed to delete $($s.FullPath): $_"
+    $targets = Select-BySelector -Candidates $Sessions -Selector $Delete
+    if (-not $targets -or $targets.Count -eq 0) {
+        Write-Warning "No session matched -Delete '$Delete'."
+        Write-Host ''
+        return
+    }
+
+    # Never delete a session that is currently running. This also closes the
+    # old footgun: -Search wrote the search phrase into the live transcript,
+    # which then matched itself.
+    $running = Get-RunningSessionId
+    $skipped = @($targets | Where-Object { $running.Contains([IO.Path]::GetFileNameWithoutExtension($_.File)) })
+    $targets = @($targets | Where-Object { -not $running.Contains([IO.Path]::GetFileNameWithoutExtension($_.File)) })
+
+    foreach ($s in $skipped) {
+        Write-Warning ("Skipping live session [{0}] {1} - it is running right now." -f $s.Index, $s.File)
+    }
+    if ($targets.Count -eq 0) {
+        Write-Warning 'Nothing left to delete after skipping running sessions.'
+        Write-Host ''
+        return
+    }
+
+    # Show exactly what will die, plus the full reclaimable footprint.
+    $plan = foreach ($s in $targets) {
+        $uuid  = [IO.Path]::GetFileNameWithoutExtension($s.File)
+        $extra = Get-SessionFootprint -Uuid $uuid
+        $extraKB = 0
+        foreach ($p in $extra) { $extraKB += Get-PathSizeKB -Path $p }
+        [PSCustomObject]@{
+            Session = $s
+            Uuid    = $uuid
+            Extra   = $extra
+            ExtraKB = $extraKB
+            TotalKB = $s.Size + $extraKB
+        }
+    }
+    $plan = @($plan)
+
+    Write-Host ''
+    Write-Host ("{0}The following {1} session(s) will be PERMANENTLY deleted:{2}" -f $Bold, $plan.Count, $Reset)
+    Write-Host ''
+    # Two transcripts can carry the SAME uuid (a session whose cwd changed, or
+    # one relocated by hand). They then share one footprint, so it must be
+    # counted once or the total lies. Dedupe by path for the total, and label
+    # the repeat rows 'shared' rather than repeating the number.
+    $uniqueExtra = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $uuidCounts  = @{}
+    foreach ($p in $plan) {
+        if (-not $uuidCounts.ContainsKey($p.Uuid)) { $uuidCounts[$p.Uuid] = 0 }
+        $uuidCounts[$p.Uuid]++
+        foreach ($e in $p.Extra) { [void]$uniqueExtra.Add($e) }
+    }
+    $sumE = 0
+    foreach ($e in $uniqueExtra) { $sumE += Get-PathSizeKB -Path $e }
+
+    Write-Host ("  {0,-5} {1,-42} {2,-28} {3,9} {4,9} {5,7}" -f 'Index', 'Folder', 'Session', 'Xcript KB', 'Extra KB', 'Parts')
+    Write-Host ("  {0,-5} {1,-42} {2,-28} {3,9} {4,9} {5,7}" -f '-----', '------', '-------', '---------', '--------', '-----')
+    $sumX = 0
+    $seenUuid = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in $plan) {
+        $name = if ($p.Session.Session) { $p.Session.Session } else { '(unnamed)' }
+        $extraCell = if ($uuidCounts[$p.Uuid] -gt 1 -and -not $seenUuid.Add($p.Uuid)) { 'shared' } else { [string]$p.ExtraKB }
+        Write-Host ("  {0,-5} {1,-42} {2,-28} {3,9} {4,9} {5,7}" -f `
+            $p.Session.Index, $p.Session.Folder, $name, $p.Session.Size, $extraCell, $p.Extra.Count)
+        $sumX += $p.Session.Size
+    }
+    Write-Host ''
+    Write-Host ("  transcripts {0} KB + sidecar/history/scratch {1} KB = {2}{3} KB total{4}" -f `
+        $sumX, $sumE, $Bold, ($sumX + $sumE), $Reset)
+    Write-Host ("  {0}memory\, history.jsonl, .claude.json and paste-cache\ are NOT touched.{1}" -f $Dim, $Reset)
+    Write-Host ("  {0}There is no Recycle Bin. This cannot be undone.{1}" -f $Red, $Reset)
+    Write-Host ''
+
+    $answer = Read-Host "Type 'yes' to delete"
+    if ($answer -ne 'yes') {
+        Write-Host ("{0}Aborted. Nothing was deleted.{1}" -f $Cyan, $Reset)
+        Write-Host ''
+        return
+    }
+
+    # Map every UUID to all root transcripts carrying it, so a sidecar is only
+    # removed once none remain anywhere. A UUID really can appear in two
+    # project dirs at once (a session whose cwd changed, or one relocated by
+    # hand), and deleting one copy must not orphan the other's sidecar.
+    $transcriptsByUuid = @{}
+    foreach ($dir in $ProjectDirs) {
+        foreach ($f in Get-ChildItem -LiteralPath $dir.FullName -Filter *.jsonl -File -ErrorAction SilentlyContinue) {
+            $u = $f.BaseName
+            if (-not $transcriptsByUuid.ContainsKey($u)) { $transcriptsByUuid[$u] = New-Object System.Collections.Generic.List[string] }
+            $transcriptsByUuid[$u].Add($f.FullName)
+        }
+    }
+
+    $deleted = 0; $failed = 0; $freedKB = 0; $keptSidecars = 0
+    foreach ($p in $plan) {
+        $s = $p.Session
+
+        if (-not (Remove-PathHard -Path $s.FullPath)) {
+            Write-Error "Failed to delete transcript $($s.FullPath)"
+            $failed++
+            continue
+        }
+        $deleted++
+        $freedKB += $s.Size
+        Write-Host ("{0}deleted{1} [{2}] {3}" -f $Green, $Reset, $s.Index, $s.File)
+
+        # Does any transcript with this UUID still exist elsewhere?
+        $stillLive = $false
+        if ($transcriptsByUuid.ContainsKey($p.Uuid)) {
+            foreach ($other in $transcriptsByUuid[$p.Uuid]) {
+                if ($other -ne $s.FullPath -and (Test-Path -LiteralPath $other)) { $stillLive = $true; break }
+            }
+        }
+        if ($stillLive) {
+            Write-Host ("  {0}kept sidecar data - another transcript with this UUID still exists{1}" -f $Dim, $Reset)
+            $keptSidecars++
+            continue
+        }
+
+        # jobs\<first8> could in principle collide with a live session's
+        # prefix, so re-check before removing that one.
+        $prefix = if ($p.Uuid.Length -ge 8) { $p.Uuid.Substring(0, 8) } else { $p.Uuid }
+        $jobsPath = Join-Path (Join-Path $ClaudeRoot 'jobs') $prefix
+        $prefixClash = $false
+        foreach ($u in $transcriptsByUuid.Keys) {
+            if ($u -ne $p.Uuid -and $u.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+                foreach ($other in $transcriptsByUuid[$u]) {
+                    if (Test-Path -LiteralPath $other) { $prefixClash = $true; break }
+                }
+            }
+            if ($prefixClash) { break }
+        }
+
+        foreach ($extra in $p.Extra) {
+            if ($extra -eq $jobsPath -and $prefixClash) {
+                Write-Host ("  {0}kept jobs\{1} - another live session shares that prefix{2}" -f $Dim, $prefix, $Reset)
+                continue
+            }
+            $kb = Get-PathSizeKB -Path $extra
+            if (Remove-PathHard -Path $extra) {
+                $freedKB += $kb
+                Write-Host ("  {0}+ removed {1} ({2} KB){3}" -f $Dim, $extra.Replace($env:USERPROFILE, '~'), $kb, $Reset)
+            } else {
+                Write-Warning "  could not remove $extra"
             }
         }
     }
 
-    if ($WhatIfPreference) {
-        Write-Output ("{0}-WhatIf: {1} session(s) would be deleted.{2}" -f $Cyan, @($Sessions).Count, $Reset)
-    } else {
-        Write-Output ("{0}Deleted {1} of {2} session(s).{3}" -f $Green, $deleted, @($Sessions).Count, $Reset)
+    Write-Host ''
+    Write-Host ("{0}Deleted {1} of {2} session(s), freed ~{3} KB ({4} MB).{5}" -f `
+        $Green, $deleted, $plan.Count, $freedKB, [math]::Round($freedKB / 1024, 2), $Reset)
+    if ($failed)       { Write-Host ("{0}{1} failed.{2}" -f $Red, $failed, $Reset) }
+    if ($keptSidecars) { Write-Host ("{0}{1} sidecar set(s) kept because a duplicate UUID is still live.{2}" -f $Dim, $keptSidecars, $Reset) }
+    Write-Host ''
+    return
+}
+
+# ---- Read a session --------------------------------------------------------
+
+if ($Open) {
+    $matched = Select-BySelector -Candidates $Sessions -Selector $Open
+    if (-not $matched -or @($matched).Count -eq 0) {
+        Write-Error "No session matched -Open '$Open'."
+        Write-Host ''
+        return
+    }
+
+    foreach ($s in @($matched)) {
+        $picked = Select-TurnsForDisplay -SessionTurns $s.Turns -N $Turns
+        $shown  = $picked.First.Count + $picked.Last.Count
+
+        $header = @(
+            ('=' * 80),
+            ("Index    : {0}" -f $s.Index),
+            ("Folder   : {0}" -f $s.Folder),
+            ("Session  : {0}" -f $s.Session),
+            ("File     : {0}" -f $s.File),
+            ("Modified : {0}" -f $s.Modified.ToString('yyyy-MM-dd HH:mm:ss')),
+            ("Size     : {0} KB" -f $s.Size),
+            ("Turns    : {0} of {1}{2}" -f $shown, $picked.Total, $(if ($Turns -gt 0) { " (first/last $Turns)" } else { ' (all)' })),
+            ('-' * 80)
+        )
+        Write-Output ("{0}{1}{2}" -f $Green, ($header -join "`n"), $Reset)
+
+        if ($shown -eq 0) {
+            Write-Output '(no conversation turns in this transcript)'
+            Write-Output ''
+            continue
+        }
+
+        foreach ($t in $picked.First) { Write-TurnBlock -Turn $t -Max $MaxChars }
+        if ($picked.Omitted -gt 0) {
+            Write-Output ("{0}... [{1} turns omitted] ...{2}" -f $Dim, $picked.Omitted, $Reset)
+            Write-Output ''
+        }
+        foreach ($t in $picked.Last) { Write-TurnBlock -Turn $t -Max $MaxChars }
     }
     return
 }
 
-# ---- Output ----------------------------------------------------------------
+# ---- Table -----------------------------------------------------------------
 
-if ($PSCmdlet.ParameterSetName -eq 'Table') {
-    $typeName = 'CCSession'
-
-    # Load the sidecar format XML so PowerShell renders this type as a table
-    # with our exact column widths, instead of falling back to Format-List
-    # (which is the default once an object has 5+ public properties).
-    $formatXml = Join-Path $PSScriptRoot 'Get-ClaudeCodeSessions.format.ps1xml'
-    if (Test-Path $formatXml) {
-        Update-FormatData -PrependPath $formatXml
-    }
-
-    foreach ($s in $Sessions) {
-        $s.PSObject.TypeNames.Insert(0, $typeName)
-        $s
-    }
-    return
-}
-
-$mode = $null; $n = 0
-switch ($PSCmdlet.ParameterSetName) {
-    'Prompt'      { $mode = 'Both';  $n = $Prompt }
-    'PromptStart' { $mode = 'Start'; $n = $PromptStart }
-    'PromptEnd'   { $mode = 'End';   $n = $PromptEnd }
+# Load the sidecar format XML so PowerShell renders this type as an autosized
+# table instead of falling back to Format-List (the default once an object has
+# 5+ public properties).
+$formatXml = Join-Path $PSScriptRoot 'Get-ClaudeCodeSessions.format.ps1xml'
+if (Test-Path $formatXml) {
+    Update-FormatData -PrependPath $formatXml
 }
 
 foreach ($s in $Sessions) {
-    $picked     = Select-TurnsForDisplay -Turns $s.Turns -Mode $mode -N $n
-    $totalShown = $picked.First.Count + $picked.Last.Count
-
-    $modeLabel = switch ($PSCmdlet.ParameterSetName) {
-        'Prompt'      { 'Prompt (first+last)' }
-        'PromptStart' { 'PromptStart' }
-        'PromptEnd'   { 'PromptEnd' }
-    }
-
-    $headerLines = @(
-        ('=' * 80),
-        ("Index    : {0}" -f $s.Index),
-        ("Folder   : {0}" -f $s.Folder),
-        ("Session  : {0}" -f $s.Session),
-        ("File     : {0}" -f $s.File),
-        ("Modified : {0}" -f $s.Modified.ToString('yyyy-MM-dd HH:mm:ss')),
-        ("Size     : {0}" -f $s.Size),
-        ("Turns    : {0} of {1} (mode: {2}, N={3})" -f $totalShown, $picked.Total, $modeLabel, $n),
-        ('-' * 80)
-    )
-    Write-Output ("{0}{1}{2}" -f $Green, ($headerLines -join "`n"), $Reset)
-
-    if ($totalShown -eq 0) {
-        Write-Output '(no matching turns)'
-        Write-Output ''
-        continue
-    }
-
-    foreach ($t in $picked.First) {
-        Write-TurnBlock -Turn $t -MaxChars $PromptMaxChars
-    }
-
-    if ($picked.Omitted -gt 0 -and $picked.First.Count -gt 0 -and $picked.Last.Count -gt 0) {
-        Write-Output ("{0}... [{1} turns omitted] ...{2}" -f $Dim, $picked.Omitted, $Reset)
-        Write-Output ''
-    }
-
-    foreach ($t in $picked.Last) {
-        Write-TurnBlock -Turn $t -MaxChars $PromptMaxChars
-    }
+    $s.PSObject.TypeNames.Insert(0, 'CCSession')
+    $s
 }

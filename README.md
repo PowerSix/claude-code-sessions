@@ -1,67 +1,51 @@
 # Get-ClaudeCodeSessions
 
-PowerShell utility for browsing, triaging, and cleaning up Claude Code session
-transcripts. List every session across every project, see custom titles, drill
-into any conversation, and delete what you don't need — with `Tab` completion on
-session names and a guard rail that won't let an unfiltered delete wipe everything.
+PowerShell utility for browsing, reading and cleaning up Claude Code session
+transcripts. List every session across every project, see custom titles, read
+any conversation, and delete the ones you don't want along with all the hidden
+data they own. `Tab` completion on session handles, one confirmation, no
+Recycle Bin surprises.
 
 ## What it does
 
 Claude Code stores every session as a JSONL file under
-`%USERPROFILE%\.claude\projects\<encoded-cwd>\`. After a few months of use
-these accumulate into hundreds of UUID-named files with no obvious way to tell
-what's what. This script reads them, extracts the parts that actually matter
-(working directory, custom title, conversation turns), and presents a sorted,
-indexed table. From there you can drill into any conversation or delete the
-sessions you no longer want — selecting them by age, size, name, or absence of
-a title, with a preview-then-delete workflow and per-file confirmation.
+`%USERPROFILE%\.claude\projects\<encoded-cwd>\`. After a few months these
+accumulate into hundreds of UUID-named files with no obvious way to tell what
+is what. This script reads them, extracts the parts that matter (working
+directory, custom title, conversation turns), and presents a sorted, indexed,
+autosized table.
+
+There are three modes, one per verb:
+
+| Command | Does |
+|---|---|
+| `Get-ClaudeCodeSessions` | list every session as a table |
+| `Get-ClaudeCodeSessions -Open <sel>` | print that session's conversation |
+| `Get-ClaudeCodeSessions -Delete <sel>` | delete it and everything it owns |
 
 ```
-Index Folder                  Session          Modified              Size File
------ ------                  -------          --------              ---- ----
-    1 \                                         2026-05-17 02:25:45   1330 a1b2c3d4-...e5f6.jsonl
-    2 \                       refactor          2026-05-14 10:34:55   1555 7g8h9i0j-...k1l2.jsonl
-    3 \                       db-migration      2026-05-11 23:55:01    554 m3n4o5p6-...q7r8.jsonl
-    4 \Projects\my-app        my-app            2026-05-15 17:02:20  14895 s9t0u1v2-...w3x4.jsonl
-    5 \Projects\side-tool     side-tool         2026-05-14 11:50:58  30363 y5z6a7b8-...c9d0.jsonl
+Index Folder         Session                    Index Modified            Size File
+----- ------         -------                    ----- --------            ---- ----
+    1 \              windows shut down suddenly     1 2026-08-30 17:14:28 2463 a1b2c3d4-1111-4aaa-8bbb-1a2b3c4d5e6f.jsonl
+    2 \Code\MyApp32  MyApp32                        2 2026-08-07 19:15:02 5636 b2c3d4e5-2222-4bbb-8ccc-2b3c4d5e6f70.jsonl
+    3 \Code\OtherApp otherapp-worker                3 2026-08-06 11:20:44 7952 c3d4e5f6-3333-4ccc-8ddd-3c4d5e6f7081.jsonl
 ```
 
-You can drill into any session and see the conversation:
-
-```
-================================================================================
-Index    : 5
-Folder   : \Projects\side-tool
-Session  : side-tool
-File     : y5z6a7b8-...c9d0.jsonl
-Modified : 2026-05-14 11:50:58
-Size     : 30363
-Turns    : 6 of 2010 (mode: Prompt (first+last), N=3)
---------------------------------------------------------------------------------
-[USER] 2026-04-19 03:30:16
-I want to add a destructor cleanup pass to the pipeline...
-
-[CLAUDE] 2026-04-19 03:30:42
-Good call. Let me look at the current lifecycle first...
-
-... [2004 turns omitted] ...
-
-[USER] 2026-05-14 11:48:01
-ok let's also handle the case where the queue is empty on shutdown
-```
+Columns are sized to their widest value, so long paths and titles are never
+truncated with `...`.
 
 ## Requirements
 
 - Windows
-- PowerShell 7+ (uses ANSI escape codes, parameter sets, and modern sort syntax)
-- Claude Code installed; the script only reads session history unless you pass `-Delete`
+- PowerShell 7+ (ANSI escapes, modern sort syntax)
+- Claude Code installed. The script only reads unless you pass `-Delete`.
 
 ## Installation
 
 Drop both files into any directory on your `$PATH`:
 
 - `Get-ClaudeCodeSessions.ps1` (the script)
-- `Get-ClaudeCodeSessions.format.ps1xml` (display rules for the table view)
+- `Get-ClaudeCodeSessions.format.ps1xml` (table display rules)
 
 Keep them in the same folder. The script auto-loads the sidecar XML via
 `$PSScriptRoot`.
@@ -71,116 +55,184 @@ Keep them in the same folder. The script auto-loads the sidecar XML via
 ### Getting help
 
 ```powershell
-Get-ClaudeCodeSessions -Help          # quick colorized reference
-Get-Help Get-ClaudeCodeSessions.ps1 -Detailed   # full PowerShell help
+Get-ClaudeCodeSessions -Help                     # quick colorized reference
+Get-Help Get-ClaudeCodeSessions.ps1 -Detailed    # full PowerShell help
 ```
 
 ### Browse
 
 ```powershell
-Get-ClaudeCodeSessions                   # newest first, sorted by Folder
+Get-ClaudeCodeSessions                   # sorted by Folder, newest first within each
 Get-ClaudeCodeSessions -Limit 20         # cap output
+Get-ClaudeCodeSessions | Where-Object Size -lt 5    # objects, not just text
 ```
 
-### Open a specific session
+### Selectors
+
+`-Open` and `-Delete` take the same selector:
+
+| Form | Meaning |
+|---|---|
+| `23` | the `Index` column from the table |
+| `de8f46e2` | a fragment of the filename / UUID |
+| `my-app` | a fragment of the `Session` name (set with `/title`) |
+| `*` | everything currently matched (`-Delete` only, and it needs a filter first) |
+
+Substring matches are case-insensitive and may return several sessions, which
+is intentional: Claude Code creates a new file each time you re-enter a
+project, so one title usually spans several transcripts.
+
+**Tab completion:** press `Tab` after `-Open` or `-Delete` to cycle through your
+real session handles, custom titles first (auto-quoted when they contain
+spaces), then UUID filenames, each with a folder and timestamp tooltip. The
+completer *replaces* the default behavior, so it no longer suggests unrelated
+files from the current directory. Title lookups are cached per file and refresh
+when a session changes.
+
+### Read a conversation
 
 ```powershell
-Get-ClaudeCodeSessions -Open 23 -Prompt 5            # by Index column
-Get-ClaudeCodeSessions -Open de8f46e2                # by UUID fragment
-Get-ClaudeCodeSessions -Open my-app -PromptEnd 10    # by custom Session name
+Get-ClaudeCodeSessions -Open 23                      # first and last 10 turns
+Get-ClaudeCodeSessions -Open de8f46e2 -Turns 3       # first and last 3
+Get-ClaudeCodeSessions -Open my-app -Turns 0         # every turn
+Get-ClaudeCodeSessions -Open 23 -MaxChars 0          # no per-turn truncation
 ```
 
-`-Open` accepts an integer (matches `Index`), or a case-insensitive substring
-that matches either the filename or the Session name. Substring matches may
-return multiple results.
+Turns print in chronological order. When the session has more than `2N` turns a
+`... [X turns omitted] ...` marker appears between the two halves.
 
-**Tab completion:** press `Tab` after `-Open` to cycle through your actual
-session handles — custom titles first (auto-quoted when they contain spaces),
-then UUID filenames, each with a folder/timestamp tooltip. The completer
-*replaces* the default behavior, so it no longer suggests unrelated files
-(`README.md`, `.gitignore`) from the current directory. Title lookups are
-cached per file and refresh when a session changes, so repeat presses are fast.
-
-### Show conversation turns
-
-```powershell
-Get-ClaudeCodeSessions -Open 23 -Prompt 5        # first 5 + last 5 turns, with gap marker
-Get-ClaudeCodeSessions -Open 23 -PromptStart 10  # first 10 turns only
-Get-ClaudeCodeSessions -Open 23 -PromptEnd 10    # last 10 turns only
 ```
+================================================================================
+Index    : 4
+Folder   : \
+Session  : crash triage
+File     : d4e5f6a7-4444-4ddd-8eee-4d5e6f708192.jsonl
+Modified : 2026-08-27 19:42:40
+Size     : 931 KB
+Turns    : 2 of 45 (first/last 1)
+--------------------------------------------------------------------------------
+[USER] 2026-08-25 20:31:34
+windows shut down suddenly
 
-Turns are shown in chronological order. When `-Prompt N` is used and the
-session has more than 2N turns, a `... [X turns omitted] ...` marker appears
-between the two halves so the conversation flow stays readable.
+... [43 turns omitted] ...
+
+[CLAUDE] 2026-08-27 19:42:33
+Done, and verified end to end...
+```
 
 ### Search transcripts
 
 ```powershell
-Get-ClaudeCodeSessions -Search "database migration"    # filter to matching sessions
-Get-ClaudeCodeSessions -Search "kiro" -Prompt 3        # search + show context turns
+Get-ClaudeCodeSessions -Search "database migration"
+Get-ClaudeCodeSessions -Search "kiro" -Open '*'      # search, then read every hit
 ```
 
-Search is case-insensitive literal matching, not regex. Punctuation like
-`(`, `[`, or `:` is treated as itself.
+Search is case-insensitive literal matching, not regex. Punctuation like `(`,
+`[` or `:` is treated as itself.
+
+### Filters
+
+All combine with logical AND, and all work on their own as read-only table
+filters:
+
+```powershell
+Get-ClaudeCodeSessions -OlderThan 90                 # untouched for 90+ days
+Get-ClaudeCodeSessions -SmallerThan 5 -Unnamed       # tiny and never titled
+```
 
 ### Cleanup
 
-Deletion is built in. The workflow is **preview, then delete the same set**:
-run a command with the narrowing selectors to see the table, then re-run the
-*identical* command with `-Delete` appended.
-
 ```powershell
-# 1. Preview: everything untouched in 30+ days
-Get-ClaudeCodeSessions -OlderThan 30
-
-# 2. Delete that exact set (prompts before each file)
-Get-ClaudeCodeSessions -OlderThan 30 -Delete
+Get-ClaudeCodeSessions -Delete 23              # one session by index
+Get-ClaudeCodeSessions -Delete de8f46e2        # by UUID fragment
+Get-ClaudeCodeSessions -Delete delete          # every session titled "delete"
+Get-ClaudeCodeSessions -OlderThan 90 -SmallerThan 5 -Delete *
 ```
 
-Selectors combine with logical AND, so you can be surgical:
+The last form is the tombstone workflow: run `/title delete` on a session when
+you are done with it, then sweep them all later with `-Delete delete`.
 
-```powershell
-# Tiny AND never-titled sessions, no per-file prompt
-Get-ClaudeCodeSessions -SmallerThan 5 -Unnamed -Delete -Confirm:$false
+Every delete prints the matched set with its full reclaimable size and asks
+once:
 
-# Dry-run a search-scoped delete (lists victims, deletes nothing)
-Get-ClaudeCodeSessions -Search "scratch" -Delete -WhatIf
+```
+The following 2 session(s) will be PERMANENTLY deleted:
 
-# Delete one specific session by index
-Get-ClaudeCodeSessions -Open 23 -Delete
+  Index Folder                                     Session                      Xcript KB  Extra KB   Parts
+  ----- ------                                     -------                      ---------  --------   -----
+  15    \                                          MyApp32                            406     68249       4
+  30    \Code\MyApp32                              MyApp32                           5636    shared       4
+
+  transcripts 6042 KB + sidecar/history/scratch 68249 KB = 74291 KB total
+  memory\, history.jsonl, .claude.json and paste-cache\ are NOT touched.
+  There is no Recycle Bin. This cannot be undone.
+
+Type 'yes' to delete:
 ```
 
-**Safety model:**
+## What `-Delete` actually removes
 
-- `-Delete` **refuses to run without a selector** (`-Search`, `-Open`,
-  `-OlderThan`, `-SmallerThan`, or `-Unnamed`). A bare `-Delete` errors out
-  rather than offering to wipe every session you own.
-- Deletion is **permanent** — straight `Remove-Item`, no Recycle Bin. The
-  per-file confirmation prompt (`ConfirmImpact='High'`) is the safety net.
-  Suppress it with `-Confirm:$false` once you trust the preview.
-- `-WhatIf` lists exactly what would be removed and touches nothing.
+A session is **not one file**. Deleting only the transcript leaves behind data
+that nothing on the system ever prunes, so `-Delete` sweeps the whole
+footprint:
 
-The selectors also work on their own as read-only filters — `-OlderThan 30`
-without `-Delete` is just a narrower table.
+| Path | Contents |
+|---|---|
+| `projects\<proj>\<uuid>.jsonl` | the transcript |
+| `projects\*\<uuid>\subagents\` | subagent transcripts |
+| `projects\*\<uuid>\tool-results\` | spilled large tool output |
+| `file-history\<uuid>\` | file edit snapshots, often the biggest part |
+| `session-env\<uuid>\` | per-session env |
+| `tasks\<uuid>\` | task lock and highwatermark |
+| `jobs\<first-8-hex>\` | background job state and timeline |
+| `%TEMP%\claude\*\<uuid>\` | background task scratch |
+
+It deliberately never touches:
+
+| Path | Why |
+|---|---|
+| `projects\<proj>\memory\` | shared per **project**, not per session. Deleting it destroys `MEMORY.md` and every auto-memory file. |
+| `history.jsonl` | your typed prompts, keyed by `sessionId`. They outlive the transcript and are the only record left of sessions that Claude Code's own `cleanupPeriodDays` reaper has deleted. |
+| `.claude.json` | per-project config, trust flags, token counters |
+| `paste-cache\` | keyed by content hash, so it cannot be attributed to a session at all |
+
+## Safety model
+
+- **The selector is required.** There is no bare `-Delete`. `-Delete *`
+  additionally refuses to run unless `-Search`, `-OlderThan`, `-SmallerThan` or
+  `-Unnamed` has narrowed the set, so it can never wipe everything at once.
+- **One confirmation.** The matched set is printed, then you must type `yes`.
+  Deletion is permanent: there is no Recycle Bin.
+- **Running sessions are always skipped.** This also closes an old footgun:
+  `-Search <phrase>` used to write that phrase into the live transcript, which
+  then matched itself and could delete the session you were sitting in.
+- **Orphan detection is global.** A sidecar directory lands wherever the `cwd`
+  was when the tool ran, so it can end up under a different project directory
+  than its transcript. A sidecar is removed only once no transcript with that
+  UUID remains in **any** project directory.
+- **Duplicate UUIDs are handled.** The same UUID really can appear as a root
+  transcript in two project directories (a session whose `cwd` changed, or one
+  relocated by hand). The shared footprint is counted once in the total,
+  labelled `shared` in the table, and removed only with the last copy.
+- **Preview by reading.** Run the same command with `-Open` instead of
+  `-Delete` to see exactly what you are about to lose.
 
 ## Parameters
 
 | Parameter | Description |
 |---|---|
-| `-Open <int or substring>` | Pick a single session. Integer matches `Index`; substring matches filename or Session name. |
-| `-Search <string>` | Filter to sessions whose transcripts contain the given literal phrase. |
-| `-Prompt <N>` | Show first N turns and last N turns of each session, with a gap marker between halves if the session has more than 2N turns. |
-| `-PromptStart <N>` | Show only the first N turns. Mutually exclusive with `-Prompt`. |
-| `-PromptEnd <N>` | Show only the last N turns. Mutually exclusive with `-Prompt`. |
-| `-Limit <N>` | Cap the number of sessions returned. 0 (default) = no limit. |
-| `-OlderThan <N>` | Keep only sessions older than N days (by `Modified`). 0 (default) disables. |
-| `-SmallerThan <N>` | Keep only sessions under N KB. 0 (default) disables. |
+| `-Open <sel>` | Print the conversation for the matched session(s). |
+| `-Delete <sel>` | Permanently delete the matched session(s) and their whole footprint. Requires typing `yes`. |
+| `-Search <string>` | Filter to sessions whose transcripts contain the literal phrase. |
+| `-Turns <N>` | With `-Open`, turns to print from each end. Default 10, `0` = all. |
+| `-MaxChars <N>` | Truncate each turn's text. Default 600, `0` = no truncation. |
+| `-OlderThan <N>` | Keep only sessions older than N days (by `Modified`). 0 disables. |
+| `-SmallerThan <N>` | Keep only sessions under N KB. 0 disables. |
 | `-Unnamed` | Keep only sessions with no custom `/title`. |
-| `-Delete` | Permanently delete the filtered set. Requires a selector; supports `-WhatIf`/`-Confirm`; prompts per file. |
-| `-PromptMaxChars <N>` | Truncate each turn's text. Default 600. Use 0 for no truncation. |
-| `-IncludeSubagents` | Include subagent transcripts (`subagents/agent-*.jsonl`). Off by default. |
-| `-NoColor` | Disable ANSI colors. Useful when piping to a file. Applies to `-Prompt` and `-Help` output. |
-| `-Help` | Print a colorized in-script reference and exit. Works without Claude Code installed. |
+| `-Limit <N>` | Cap the number of sessions returned. 0 = no limit. |
+| `-IncludeSubagents` | Also list subagent transcripts as their own rows. |
+| `-NoColor` | Disable ANSI colors. Useful when redirecting to a file. |
+| `-Help` | Print a colorized in-script reference and exit. |
 
 ### Why `-Open` instead of `-File`
 
@@ -192,26 +244,28 @@ invoked. `-Open` reads naturally and avoids the conflict.
 
 | Column | Source |
 |---|---|
-| `Index` | Position in the sorted list. Stable across calls until a session is added or removed. |
-| `Folder` | The `cwd` recorded inside the first user message, shown relative to your home directory. `\` means the home directory itself. |
-| `Session` | The custom title set via `/title` in Claude Code. Latest title wins if renamed mid-conversation. Blank if never named. |
-| `Modified` | Filesystem mtime of the JSONL. Updates each time the session is written to. |
-| `Size` | File size in KB, rounded to integer. |
+| `Index` | Position in the sorted list. Assigned before the filters run, so numbers stay stable until a session is added or removed. |
+| `Folder` | The `cwd` recorded inside the first user message, shown relative to your home directory. `\` means the home directory itself. Falls back to decoding the directory name. |
+| `Session` | The custom title set via `/title`. Latest title wins if renamed mid-conversation. Blank if never named. |
+| `Modified` | Filesystem mtime of the JSONL. |
+| `Size` | File size in KB, rounded. |
 | `File` | Filename (UUID + `.jsonl`). Each `/exit` and re-enter creates a new file. |
 
-Sessions sort by `Folder` ascending, then `Modified` descending. All sessions
-under a project cluster together with the most recent on top.
+Sessions sort by `Folder` ascending, then `Modified` descending.
 
 ## Notes
 
-- `-Open <name>` may return multiple results because Claude Code creates a
-  new file each time you re-enter a project. That's intentional; you usually
-  want the full history under that name.
 - The script never *modifies* session files. The only write operation is
-  `-Delete`, which removes whole transcripts via `Remove-Item` on `FullPath`
-  and refuses to run without a narrowing selector.
-- ANSI colors require a terminal that supports them (Windows Terminal,
-  modern VS Code terminal, recent ConEmu). Use `-NoColor` when redirecting.
-- Custom session titles are pulled from `custom-title` events embedded in
-  the JSONL. If you have not run `/title` in a session, that column stays
-  empty.
+  `-Delete`.
+- If `.claude\projects` is redirected into OneDrive, Files-On-Demand marks
+  synced directories `ReadOnly + ReparsePoint`. Both `Remove-Item` and
+  `Directory.Delete` fail on those with access-denied until the attribute is
+  cleared, which this script does before deleting.
+- Also beware that `Get-ChildItem -Recurse` will **not** descend a junction, so
+  an ad-hoc `~\.claude -Recurse` search finds almost nothing when `projects` is
+  a junction. Start the search at `projects` itself. (OneDrive placeholder
+  directories use a transparent reparse tag and *are* traversed.)
+- ANSI colors require a terminal that supports them (Windows Terminal, modern
+  VS Code terminal, recent ConEmu). Use `-NoColor` when redirecting.
+- Custom titles come from `custom-title` events embedded in the JSONL. If you
+  have never run `/title` in a session, that column stays empty.

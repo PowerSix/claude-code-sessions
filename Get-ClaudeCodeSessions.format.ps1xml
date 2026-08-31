@@ -7,30 +7,41 @@
                 <TypeName>CCSession</TypeName>
             </ViewSelectedBy>
             <TableControl>
+                <!-- AutoSize makes PowerShell buffer every row and size each
+                     column to its widest value (header included), instead of
+                     the old fixed widths that amputated long Folder paths,
+                     custom Session titles, and the UUID File column. This is
+                     the format-layer equivalent of Format-Table -AutoSize, so
+                     the script still emits real CCSession objects and the
+                     pipeline (e.g. | Where-Object Size -lt 5) keeps working. -->
+                <AutoSize/>
                 <TableHeaders>
                     <TableColumnHeader>
                         <Label>Index</Label>
-                        <Width>5</Width>
                         <Alignment>Right</Alignment>
                     </TableColumnHeader>
                     <TableColumnHeader>
                         <Label>Folder</Label>
-                        <Width>43</Width>
                         <Alignment>Left</Alignment>
                     </TableColumnHeader>
                     <TableColumnHeader>
                         <Label>Session</Label>
-                        <Width>18</Width>
                         <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                    <!-- Index deliberately repeated here. You pick a session by
+                         reading Session/Modified/Size on the right, and with 39+
+                         rows tracking back to the far-left number is error prone
+                         when the next thing you type is -Delete <n>. -->
+                    <TableColumnHeader>
+                        <Label>Index</Label>
+                        <Alignment>Right</Alignment>
                     </TableColumnHeader>
                     <TableColumnHeader>
                         <Label>Modified</Label>
-                        <Width>19</Width>
                         <Alignment>Left</Alignment>
                     </TableColumnHeader>
                     <TableColumnHeader>
                         <Label>Size</Label>
-                        <Width>6</Width>
                         <Alignment>Right</Alignment>
                     </TableColumnHeader>
                     <TableColumnHeader>
@@ -49,6 +60,9 @@
                             </TableColumnItem>
                             <TableColumnItem>
                                 <PropertyName>Session</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>Index</PropertyName>
                             </TableColumnItem>
                             <TableColumnItem>
                                 <ScriptBlock>$_.Modified.ToString('yyyy-MM-dd HH:mm:ss')</ScriptBlock>
