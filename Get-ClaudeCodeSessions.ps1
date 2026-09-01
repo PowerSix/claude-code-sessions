@@ -525,18 +525,27 @@ function Get-RunningSessionId {
     # trust an entry whose pid is still alive, otherwise a crashed session
     # would be protected forever. CLAUDE_CODE_SESSION_ID covers the case where
     # this script is run from inside a session's own shell.
-    $ids = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    if ($env:CLAUDE_CODE_SESSION_ID) { [void]$ids.Add($env:CLAUDE_CODE_SESSION_ID) }
+    #
+    # Returns a plain string ARRAY, deliberately not a HashSet. PowerShell
+    # enumerates any collection a function outputs, so returning a HashSet
+    # yields $null for 0 entries, a bare [string] for 1, and [object[]] for 2+.
+    # The $null case then throws on .Contains(), and the single-string case
+    # silently switches to String.Contains() substring matching. Test membership
+    # at the call site with -contains / -notcontains: those are case-insensitive
+    # for strings, do equality rather than substring, and treat $null as "no
+    # match" instead of erroring.
+    $ids = New-Object System.Collections.Generic.List[string]
+    if ($env:CLAUDE_CODE_SESSION_ID) { $ids.Add([string]$env:CLAUDE_CODE_SESSION_ID) }
     $dir = Join-Path $ClaudeRoot 'sessions'
     if (Test-Path -LiteralPath $dir) {
         foreach ($f in Get-ChildItem -LiteralPath $dir -Filter *.json -File -ErrorAction SilentlyContinue) {
             try { $o = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch { continue }
             if (-not $o.sessionId) { continue }
             if ($o.pid -and -not (Get-Process -Id $o.pid -ErrorAction SilentlyContinue)) { continue }
-            [void]$ids.Add([string]$o.sessionId)
+            $ids.Add([string]$o.sessionId)
         }
     }
-    return $ids
+    return [string[]]$ids
 }
 
 function Remove-PathHard {
@@ -682,8 +691,10 @@ if ($Delete) {
         return
     }
 
-    $targets = Select-BySelector -Candidates $Sessions -Selector $Delete
-    if (-not $targets -or $targets.Count -eq 0) {
+    # @() so .Count is reliable: a function's output is unrolled, so a single
+    # match would otherwise arrive as a bare object rather than a 1-item array.
+    $targets = @(Select-BySelector -Candidates $Sessions -Selector $Delete)
+    if ($targets.Count -eq 0) {
         Write-Warning "No session matched -Delete '$Delete'."
         Write-Host ''
         return
@@ -692,15 +703,22 @@ if ($Delete) {
     # Never delete a session that is currently running. This also closes the
     # old footgun: -Search wrote the search phrase into the live transcript,
     # which then matched itself.
-    $running = Get-RunningSessionId
-    $skipped = @($targets | Where-Object { $running.Contains([IO.Path]::GetFileNameWithoutExtension($_.File)) })
-    $targets = @($targets | Where-Object { -not $running.Contains([IO.Path]::GetFileNameWithoutExtension($_.File)) })
+    # -contains, not .Contains(): see the note in Get-RunningSessionId. With no
+    # session running at all (Claude Code closed) the function returns nothing,
+    # and -contains simply reports no match instead of throwing on $null.
+    $running = @(Get-RunningSessionId)
+    $skipped = @($targets | Where-Object { $running -contains [IO.Path]::GetFileNameWithoutExtension($_.File) })
+    $targets = @($targets | Where-Object { $running -notcontains [IO.Path]::GetFileNameWithoutExtension($_.File) })
 
     foreach ($s in $skipped) {
         Write-Warning ("Skipping live session [{0}] {1} - it is running right now." -f $s.Index, $s.File)
     }
     if ($targets.Count -eq 0) {
-        Write-Warning 'Nothing left to delete after skipping running sessions.'
+        if ($skipped.Count -gt 0) {
+            Write-Warning 'Nothing left to delete: every matched session is running right now. Exit it first, or run this from outside Claude Code.'
+        } else {
+            Write-Warning "No session matched -Delete '$Delete'."
+        }
         Write-Host ''
         return
     }
@@ -708,7 +726,9 @@ if ($Delete) {
     # Show exactly what will die, plus the full reclaimable footprint.
     $plan = foreach ($s in $targets) {
         $uuid  = [IO.Path]::GetFileNameWithoutExtension($s.File)
-        $extra = Get-SessionFootprint -Uuid $uuid
+        # @() because Get-SessionFootprint's List is unrolled on output: without
+        # it, 0 paths arrive as $null and 1 path as a bare string.
+        $extra = @(Get-SessionFootprint -Uuid $uuid)
         $extraKB = 0
         foreach ($p in $extra) { $extraKB += Get-PathSizeKB -Path $p }
         [PSCustomObject]@{
@@ -843,14 +863,14 @@ if ($Delete) {
 # ---- Read a session --------------------------------------------------------
 
 if ($Open) {
-    $matched = Select-BySelector -Candidates $Sessions -Selector $Open
-    if (-not $matched -or @($matched).Count -eq 0) {
+    $matched = @(Select-BySelector -Candidates $Sessions -Selector $Open)
+    if ($matched.Count -eq 0) {
         Write-Error "No session matched -Open '$Open'."
         Write-Host ''
         return
     }
 
-    foreach ($s in @($matched)) {
+    foreach ($s in $matched) {
         $picked = Select-TurnsForDisplay -SessionTurns $s.Turns -N $Turns
         $shown  = $picked.First.Count + $picked.Last.Count
 
