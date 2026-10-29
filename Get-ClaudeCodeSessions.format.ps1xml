@@ -44,6 +44,16 @@
                         <Label>Size</Label>
                         <Alignment>Right</Alignment>
                     </TableColumnHeader>
+                    <!-- Tokens in context as of the last reply. Decimal k, not
+                         KiB, because context windows are quoted as 200k / 1M. -->
+                    <TableColumnHeader>
+                        <Label>Context</Label>
+                        <Alignment>Right</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Model</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
                     <TableColumnHeader>
                         <Label>File</Label>
                         <Alignment>Left</Alignment>
@@ -68,10 +78,110 @@
                                 <ScriptBlock>$_.Modified.ToString('yyyy-MM-dd HH:mm:ss')</ScriptBlock>
                             </TableColumnItem>
                             <TableColumnItem>
-                                <PropertyName>Size</PropertyName>
+                                <!-- Size is the transcript file alone, in KB. The
+                                     unit is printed in the cell because a bare
+                                     number next to Context read as anything. -->
+                                <ScriptBlock>'{0:N0} KB' -f $_.Size</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <ScriptBlock>if ($null -ne $_.Context) { '{0}k' -f [math]::Round($_.Context / 1000) }</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <!-- The object keeps the raw API name for filtering
+                                     ('claude-opus-5-5'); the view shows it the way
+                                     Claude Code does ('opus 5.5'). Unknown shapes
+                                     pass through unchanged. -->
+                                <ScriptBlock>
+                                    $m = $_.Model -replace '^claude-', '' -replace '-\d{8}$', ''
+                                    if ($m -match '^([a-z]+)-(\d+)(?:-(\d+))?$') {
+                                        $Matches[1] + ' ' + $Matches[2] + $(if ($Matches[3]) { '.' + $Matches[3] })
+                                    } else { $m }
+                                </ScriptBlock>
                             </TableColumnItem>
                             <TableColumnItem>
                                 <PropertyName>File</PropertyName>
+                            </TableColumnItem>
+                        </TableColumnItems>
+                    </TableRowEntry>
+                </TableRowEntries>
+            </TableControl>
+        </View>
+        <!-- -Orphans rows. Index prints as o# so it can never be mistaken for
+             a session index: -Delete o3 without -Orphans is refused. -->
+        <View>
+            <Name>CCOrphan</Name>
+            <ViewSelectedBy>
+                <TypeName>CCOrphan</TypeName>
+            </ViewSelectedBy>
+            <TableControl>
+                <AutoSize/>
+                <TableHeaders>
+                    <TableColumnHeader>
+                        <Label>Index</Label>
+                        <Alignment>Right</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>State</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Kind</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Folder</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Files</Label>
+                        <Alignment>Right</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Size</Label>
+                        <Alignment>Right</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Last write</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Why</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Path</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                </TableHeaders>
+                <TableRowEntries>
+                    <TableRowEntry>
+                        <TableColumnItems>
+                            <TableColumnItem>
+                                <ScriptBlock>'o' + $_.Index</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>State</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>Kind</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>Folder</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>Files</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <ScriptBlock>'{0:N0} KB' -f [math]::Ceiling($_.Bytes / 1KB)</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <ScriptBlock>if ($_.LastWrite) { $_.LastWrite.ToString('yyyy-MM-dd') }</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>Why</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>Path</PropertyName>
                             </TableColumnItem>
                         </TableColumnItems>
                     </TableRowEntry>
