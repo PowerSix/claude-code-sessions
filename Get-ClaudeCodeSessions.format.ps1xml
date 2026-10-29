@@ -13,7 +13,9 @@
                      custom Session titles, and the UUID File column. This is
                      the format-layer equivalent of Format-Table -AutoSize, so
                      the script still emits real CCSession objects and the
-                     pipeline (e.g. | Where-Object Size -lt 5) keeps working. -->
+                     pipeline (e.g. | Where-Object Size -lt 5) keeps working.
+                     A console narrower than the table still makes PowerShell
+                     cut or drop the rightmost columns. -->
                 <AutoSize/>
                 <TableHeaders>
                     <TableColumnHeader>
@@ -29,9 +31,9 @@
                         <Alignment>Left</Alignment>
                     </TableColumnHeader>
                     <!-- Index deliberately repeated here. You pick a session by
-                         reading Session/Modified/Size on the right, and with 39+
-                         rows tracking back to the far-left number is error prone
-                         when the next thing you type is -Delete <n>. -->
+                         reading Session/Modified/Size on the right, and on a
+                         long table tracking back to the far-left number is error
+                         prone when the next thing you type is -Delete <n>. -->
                     <TableColumnHeader>
                         <Label>Index</Label>
                         <Alignment>Right</Alignment>
@@ -84,13 +86,18 @@
                                 <ScriptBlock>'{0:N0} KB' -f $_.Size</ScriptBlock>
                             </TableColumnItem>
                             <TableColumnItem>
-                                <ScriptBlock>if ($null -ne $_.Context) { '{0}k' -f [math]::Round($_.Context / 1000) }</ScriptBlock>
+                                <!-- Half away from zero (2,500 shows 3k, not banker's 2k);
+                                     under 1,000 there is nothing to round to. This is XML,
+                                     so the '<1k' label is written &lt;1k: a bare '<' made
+                                     Update-FormatData reject the whole file. -->
+                                <ScriptBlock>if ($null -ne $_.Context) { if ($_.Context -lt 1000) { '&lt;1k' } else { '{0}k' -f [math]::Round($_.Context / 1000, [MidpointRounding]::AwayFromZero) } }</ScriptBlock>
                             </TableColumnItem>
                             <TableColumnItem>
                                 <!-- The object keeps the raw API name for filtering
-                                     ('claude-opus-5-5'); the view shows it the way
-                                     Claude Code does ('opus 5.5'). Unknown shapes
-                                     pass through unchanged. -->
+                                     ('claude-opus-5-5'); the view shortens it to
+                                     'opus 5.5'. The 'claude-' prefix and an 8-digit
+                                     date suffix are always dropped; a name that is
+                                     not then family-major[-minor] is shown as is. -->
                                 <ScriptBlock>
                                     $m = $_.Model -replace '^claude-', '' -replace '-\d{8}$', ''
                                     if ($m -match '^([a-z]+)-(\d+)(?:-(\d+))?$') {
@@ -172,7 +179,7 @@
                                 <PropertyName>Files</PropertyName>
                             </TableColumnItem>
                             <TableColumnItem>
-                                <ScriptBlock>'{0:N0} KB' -f [math]::Ceiling($_.Bytes / 1KB)</ScriptBlock>
+                                <ScriptBlock>'{0:N0} KB' -f $_.Size</ScriptBlock>
                             </TableColumnItem>
                             <TableColumnItem>
                                 <ScriptBlock>if ($_.LastWrite) { $_.LastWrite.ToString('yyyy-MM-dd') }</ScriptBlock>
