@@ -14,12 +14,13 @@ Claude Code stores every session as a JSONL file under
 accumulate into hundreds of UUID-named files with no obvious way to tell what
 is what. This script reads them and shows one sorted, numbered table.
 
-There are four modes:
+There are five modes:
 
 | Command | Does |
 |---|---|
 | `Get-ClaudeCodeSessions` | list every session as a table |
 | `Get-ClaudeCodeSessions -Open <sel>` | print that session's conversation |
+| `Get-ClaudeCodeSessions -Resume <sel>` | carry on with it in Claude Code, started from its folder |
 | `Get-ClaudeCodeSessions -Delete <sel>` | delete it and everything it owns |
 | `Get-ClaudeCodeSessions -Orphans` | list what deleted and moved sessions left behind |
 
@@ -97,16 +98,18 @@ under 200k the window it ran on cannot be read back.
 
 ### Selectors
 
-`-Open` and `-Delete` take the same selector:
+`-Open`, `-Resume` and `-Delete` take the same selector:
 
 | Form | Meaning |
 |---|---|
 | `23` | the `Index` column from the table |
 | `d4e5f6a7` | a fragment of the file name / UUID |
-| `my-app` | a fragment of the `Session` title: yours, and for `-Open` a generated `*` one too |
+| `my-app` | a fragment of the `Session` title: yours, and for `-Open` and `-Resume` a generated `*` one too |
 | `*` | everything currently listed. With `-Delete` it needs a filter first. |
 
-Fragments are literal and case-insensitive, so `[WIP]` means those five
+All digits always means an Index, so a session ID that starts with eight
+digits needs a little more of it (`12345678-0089`); the error says so and
+shows the form to use. Fragments are literal and case-insensitive, so `[WIP]` means those five
 characters, not a wildcard. They may match several sessions; `-Open` prints
 each, and `-Delete` plans them all and asks once. A fragment that happens to
 match every session (`-` will) is treated like `*` and needs a filter too.
@@ -124,9 +127,9 @@ renumbers the ones it passes. That is why the delete plan prints each
 target's first prompt: a stale index shows up there before it costs you
 anything.
 
-**Tab completion:** press `Tab` after `-Open` or `-Delete` to cycle through
+**Tab completion:** press `Tab` after `-Open`, `-Resume` or `-Delete` to cycle through
 your real session handles, custom titles first, then UUID file names, each
-with a folder and timestamp tooltip. After `-Open`, generated titles come
+with a folder and timestamp tooltip. After `-Open` and `-Resume`, generated titles come
 next, listed as `*title`; `-Delete` leaves them out, since it never matches
 them. A title is quoted whenever PowerShell
 would otherwise misread it (spaces, `#`, `,`, `$`, parentheses, a leading
@@ -177,6 +180,30 @@ have found a session here you never have to find it again in the picker. It
 also says when the session is running in another window right now, or when
 its folder no longer exists.
 
+### Resume a session
+
+`-Resume` runs that line for you:
+
+```powershell
+Get-ClaudeCodeSessions -Resume 23
+Get-ClaudeCodeSessions -Search "staging migrate" -Resume 1    # find it, then carry on with it
+```
+
+It changes into the folder the session ran in, starts `claude --resume <id>`
+there, and puts your terminal back where it was when Claude exits. That folder
+comes from the transcript itself: the `cwd` recorded on the session's first
+turn, checked against the project dir Claude Code filed it under, with the
+folders Claude Code recorded for that dir as the fallback. The selector works
+like `-Open`'s, generated titles included, but has to match exactly one
+session; a subagent row resumes the session it belongs to.
+
+It starts nothing, and says why, when it cannot do this safely:
+
+- the session is running right now in another window (two windows on one
+  session would both write its transcript),
+- a running session's registry entry cannot be read, so that is unknown,
+- the folder is gone, or no recorded folder maps to the session's project dir,
+- `claude` is not on `PATH`; then it prints the command to run yourself.
 ### Search transcripts
 
 ```powershell
@@ -496,6 +523,7 @@ throwing away.
 | Parameter | Description |
 |---|---|
 | `-Open <sel>` | Print the conversation for the matched session(s). |
+| `-Resume <sel>` | Carry on with exactly one matched session in Claude Code: changes into its folder, runs `claude --resume <id>`, comes back when Claude exits. Refuses a running session, a gone folder, or a missing `claude`. |
 | `-Delete <sel>` | Permanently delete the matched session(s) and their whole footprint. Requires typing `yes`, or `all` to also remove what the delete leaves behind. |
 | `-Orphans` | List what no live session can reach. With `-Delete`, remove them: `o#`, a kind, `dormant`, a path fragment, or `*` (orphans only). |
 | `-Search <string>` | Filter to sessions whose transcripts contain the literal phrase, with a `Found` column saying where. Backslashes and quotes are matched as typed. With `-Open`, shows the turns that mention it. |

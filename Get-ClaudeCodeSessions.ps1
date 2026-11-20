@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-    Lists, reads and deletes Claude Code sessions, and finds what deleted
-    sessions left behind.
+    Lists, reads, resumes and deletes Claude Code sessions, and finds what
+    deleted sessions left behind.
 
 .DESCRIPTION
     Lists or searches the .jsonl session transcripts Claude Code stores under
@@ -24,9 +24,10 @@
 
     Requires PowerShell 7.
 
-    Four modes:
+    Modes:
       (no selector)    table of every session, by Folder, newest first in each
       -Open <sel>      print that session's conversation
+      -Resume <sel>    carry on with that session in Claude Code, from its folder
       -Delete <sel>    permanently remove that session and everything it owns
       -Orphans         list what deleted and moved sessions left behind
 
@@ -157,6 +158,19 @@
 
     Note: this is named -Open instead of -File because pwsh.exe treats
     -File as its own script-launcher argument and would eat the value.
+
+.PARAMETER Resume
+    Select one session and carry on with it in Claude Code: changes into the
+    folder the session ran in, runs 'claude --resume <id>' there, and comes
+    back to the current folder when Claude exits. Same selector forms as
+    -Open, generated titles included, but it must match exactly one session;
+    a subagent row resumes the session it belongs to.
+
+    It starts nothing when it cannot do that safely: the session is running
+    in another window (two windows would both write one transcript), a
+    running session's registry entry cannot be read, the folder is gone or
+    unknown, or claude is not on PATH. It says which, with the command to
+    run yourself where that helps.
 
 .PARAMETER Delete
     Select sessions and permanently delete them, along with their sidecar,
@@ -297,6 +311,10 @@
     Get-ClaudeCodeSessions -Search 'staging migrate' -Open 4
     Only the turns of session #4 that mention the phrase, each cut around
     the mention, then paste the Resume line to carry on with it.
+
+.EXAMPLE
+    Get-ClaudeCodeSessions -Search 'staging migrate' -Resume 4
+    Found it: open session #4 in Claude Code, started from its own folder.
 
 .EXAMPLE
     Get-ClaudeCodeSessions | Where-Object Size -lt 5
@@ -495,6 +513,88 @@ param(
 
     [int]$Limit = 0,
 
+    # The -Open completer again, word for word: the same handles resume a
+    # session. A copy for the reason given on -Delete's. Declared after the
+    # other string parameters so no existing position shifts.
+    [ArgumentCompleter({
+        param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
+
+        # Offers session handles instead of file names: custom titles first,
+        # then UUIDs. (When nothing here matches what was typed, PowerShell
+        # falls back to suggesting files; a completer cannot prevent that.)
+        $root = Join-Path $env:USERPROFILE '.claude\projects'
+        if (-not (Test-Path -LiteralPath $root)) { return }
+        $word = $wordToComplete.Trim("'", '"')
+        # Get-Variable, not $global:..., which throws under any StrictMode
+        # before the first completion has created it.
+        $cache = Get-Variable -Name CCSessionTitleCache -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+        if ($cache -isnot [hashtable]) { $cache = @{}; $global:CCSessionTitleCache = $cache }
+        $titles = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $aiTitles = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $files  = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $seen   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $homePath = $env:USERPROFILE.TrimEnd('\')
+        foreach ($dir in Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue) {
+            foreach ($file in Get-ChildItem -LiteralPath $dir.FullName -Filter *.jsonl -File -Force -ErrorAction SilentlyContinue) {
+                $stem = $file.BaseName
+                # Title lookups read whole transcripts, so cache them keyed by
+                # path and invalidate on LastWriteTime.
+                $entry = $cache[$file.FullName]
+                if (-not $entry -or $entry.Mtime -ne $file.LastWriteTimeUtc.Ticks -or -not $entry.ContainsKey('AiTitle')) {
+                    $title = ''; $aiTitle = ''
+                    # Both title records, the last of each winning. A line that
+                    # merely quotes one is JSON-escaped, so it never carries
+                    # this unescaped marker.
+                    foreach ($h in (Select-String -LiteralPath $file.FullName -Pattern '"type":"(custom|ai)-title"' -ErrorAction SilentlyContinue)) {
+                        try { $rec = $h.Line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+                        if ($rec.type -eq 'custom-title' -and $rec.customTitle) { $title = [string]$rec.customTitle }
+                        elseif ($rec.type -eq 'ai-title' -and $rec.aiTitle) { $aiTitle = [string]$rec.aiTitle }
+                    }
+                    # The folder for the tooltip comes from the recorded cwd:
+                    # decoding the dir name is lossy ('-' was any character).
+                    $folder = $dir.Name
+                    $cwdHit = Select-String -LiteralPath $file.FullName -Pattern '"cwd":"((?:[^"\\]|\\.)*)"' -List -ErrorAction SilentlyContinue
+                    if ($cwdHit) {
+                        $cwdPath = $cwdHit.Matches[0].Groups[1].Value -replace '\\\\', '\'
+                        $folder = if ($cwdPath -ieq $homePath) { '\' } elseif ($cwdPath.StartsWith("$homePath\", [System.StringComparison]::OrdinalIgnoreCase)) { $cwdPath.Substring($homePath.Length) } else { $cwdPath }
+                    }
+                    $entry = @{ Mtime = $file.LastWriteTimeUtc.Ticks; Title = $title; AiTitle = $aiTitle; Folder = $folder }
+                    $cache[$file.FullName] = $entry
+                }
+                $when = $file.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+                if (-not $word -or $stem.IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    $files.Add([System.Management.Automation.CompletionResult]::new(
+                        $stem, $stem, 'ParameterValue', ('{0}  {1}' -f $entry.Folder, $when)))
+                }
+                $title = $entry.Title
+                if ($title -and (-not $word -or $title.IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and $seen.Add($title)) {
+                    # Quote anything that is not plain word characters, or the
+                    # parser gets it: '#x' starts a comment, 'a,b' is an array,
+                    # '$x' expands, '(x)' runs x, and a leading '-' is a parameter.
+                    $completion = if ($title -match '^[\w.][\w.-]*$') { $title } else {
+                        "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($title) + "'"
+                    }
+                    $titles.Add([System.Management.Automation.CompletionResult]::new(
+                        $completion, $title, 'ParameterValue', ("Session: {0}  ({1}, {2})" -f $title, $entry.Folder, $when)))
+                } elseif (-not $title -and $entry.AiTitle -and (-not $word -or $entry.AiTitle.IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and $seen.Add($entry.AiTitle)) {
+                    # Generated titles too, listed as *title like the table.
+                    # What gets inserted is the plain title, which -Open matches
+                    # (-Delete does not, so its completer leaves these out).
+                    $ai = $entry.AiTitle
+                    $completion = if ($ai -match '^[\w.][\w.-]*$') { $ai } else {
+                        "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($ai) + "'"
+                    }
+                    $aiTitles.Add([System.Management.Automation.CompletionResult]::new(
+                        $completion, "*$ai", 'ParameterValue', ("Generated title: {0}  ({1}, {2})" -f $ai, $entry.Folder, $when)))
+                }
+            }
+        }
+        $out = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $out.AddRange($titles); $out.AddRange($aiTitles); $out.AddRange($files)
+        return $out
+    })]
+    [string]$Resume,
+
     [switch]$IncludeSubagents,
 
     [switch]$NoColor,
@@ -534,18 +634,19 @@ if ($NoColor) {
 
 if ($Help) {
     $h = @"
-${Bold}${Green}Get-ClaudeCodeSessions${Reset} - List, read and delete Claude Code sessions.
+${Bold}${Green}Get-ClaudeCodeSessions${Reset} - List, read, resume and delete Claude Code sessions.
 
-${Bold}FOUR MODES${Reset}
+${Bold}MODES${Reset}
   ${Cyan}Get-ClaudeCodeSessions${Reset}                 list every session as a table
   ${Cyan}Get-ClaudeCodeSessions -Open${Reset} <sel>     print that session's conversation
+  ${Cyan}Get-ClaudeCodeSessions -Resume${Reset} <sel>   carry on with it in Claude Code, from its folder
   ${Cyan}Get-ClaudeCodeSessions -Delete${Reset} <sel>   delete it and everything it owns
   ${Cyan}Get-ClaudeCodeSessions -Orphans${Reset}        list what deleted and moved sessions left behind
 
-${Bold}SELECTORS${Reset} (for -Open and -Delete)
+${Bold}SELECTORS${Reset} (for -Open, -Resume and -Delete)
   ${Cyan}23${Reset}          the Index column from the table
   ${Cyan}d4e5f6a7${Reset}    a fragment of the file name / UUID
-  ${Cyan}my-app${Reset}      a fragment of the Session title. -Open also matches the
+  ${Cyan}my-app${Reset}      a fragment of the Session title. -Open and -Resume also match the
               *titles Claude Code generated; -Delete never does.
   ${Cyan}*${Reset}           everything currently listed. With -Delete it needs a filter
               first, and so does a fragment that matches every session.
@@ -627,6 +728,7 @@ ${Bold}EXAMPLES${Reset}
   Get-ClaudeCodeSessions -Search "database migration"
   Get-ClaudeCodeSessions -Search 'C:\work\api'
   Get-ClaudeCodeSessions -Search 'staging migrate' -Open 4
+  Get-ClaudeCodeSessions -Search 'staging migrate' -Resume 4
   Get-ClaudeCodeSessions | Where-Object Context -gt 200000
   Get-ClaudeCodeSessions -Delete 23
   Get-ClaudeCodeSessions -Delete delete
@@ -644,13 +746,13 @@ if (-not (Test-Path -LiteralPath $ProjectsRoot)) {
     return
 }
 
-if ($Open -and $Delete) {
-    Write-Error 'Use -Open to read a session or -Delete to remove one, not both.'
+if (@($Open, $Delete, $Resume | Where-Object { $_ }).Count -gt 1) {
+    Write-Error 'Use one of -Open (read a session), -Resume (carry on with it) or -Delete (remove it), not both or all three at once.'
     Write-Host ''
     return
 }
 
-if ($Orphans -and ($Open -or $Search -or $Everywhere -or $OlderThan -or $SmallerThan -or $Unnamed -or $Limit -or $IncludeSubagents)) {
+if ($Orphans -and ($Open -or $Resume -or $Search -or $Everywhere -or $OlderThan -or $SmallerThan -or $Unnamed -or $Limit -or $IncludeSubagents)) {
     Write-Error '-Orphans works on its own, or with -Delete to remove what it lists. Session filters do not apply to it.'
     Write-Host ''
     return
@@ -1008,6 +1110,38 @@ function Get-ResumeFolder {
     return $null
 }
 
+function Get-ResumeTarget {
+    # What 'claude --resume' needs for a table row, shared by the -Open
+    # header line and -Resume so the two can never disagree: the session ID
+    # (a subagent row's own session, since subagents are not resumable), the
+    # folder to start it in, why it cannot be resumed ($null if it can), and
+    # whether it is running right now.
+    param($Row, [string[]]$LiveIds)
+    $id = [IO.Path]::GetFileNameWithoutExtension($Row.File)
+    $projDir = Split-Path (Split-Path $Row.FullPath -Parent) -Leaf
+    $isSub = Test-SubagentPath $Row.FullPath
+    if ($isSub) {
+        $sidecar = Split-Path (Split-Path $Row.FullPath -Parent) -Parent
+        $id = Split-Path $sidecar -Leaf
+        $projDir = Split-Path (Split-Path $sidecar -Parent) -Leaf
+    }
+    $t = @{ Id = $id; Folder = $null; Problem = $null; Running = $false; Subagent = $isSub }
+    if (-not (Test-SessionId $id)) { $t.Problem = 'not named like a session ID, so there is nothing to resume'; return $t }
+    $t.Folder  = Get-ResumeFolder -Cwd $(if ($Row.PSObject.Properties['Cwd']) { $Row.Cwd }) -DirName $projDir
+    $t.Running = $LiveIds -contains $id
+    if (-not $t.Folder) { $t.Problem = 'no recorded folder maps to its project dir; run it from where the session ran' }
+    elseif (-not (Test-Path -LiteralPath $t.Folder -PathType Container)) { $t.Problem = 'that folder no longer exists' }
+    return $t
+}
+
+function Format-ResumeCommand {
+    # The command as you would type it: cd into the folder, then resume.
+    param($Target)
+    $resume = 'claude --resume {0}' -f $Target.Id
+    if ($Target.Folder) { return "cd '{0}'; {1}" -f ($Target.Folder -replace "'", "''"), $resume }
+    return $resume
+}
+
 function ConvertTo-FolderLabel {
     param([string]$Cwd, [string]$DirName)
 
@@ -1119,6 +1253,22 @@ function Select-BySelector {
         [IO.Path]::GetFileNameWithoutExtension($_.File).IndexOf($Selector, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         ($shownTitle -and $shownTitle.IndexOf($Selector, [StringComparison]::OrdinalIgnoreCase) -ge 0)
     })
+}
+
+function Get-DigitsHint {
+    # An all-digit selector is always an Index. About 2% of session IDs also
+    # start with eight digits, and the start of the file name is what you
+    # copy, so when the digits match no index but do start an ID, say so and
+    # give a longer form that works instead of a bare "no match".
+    param([object[]]$Candidates, [string]$Selector, [string]$Mode)
+    if ($Selector -notmatch '^#?\d+$') { return '' }
+    $digits = $Selector.TrimStart('#')
+    $hit = @($Candidates | Where-Object { [IO.Path]::GetFileNameWithoutExtension($_.File).StartsWith($digits, [StringComparison]::OrdinalIgnoreCase) })[0]
+    if (-not $hit) { return '' }
+    $stem = [IO.Path]::GetFileNameWithoutExtension($hit.File)
+    $longer = $stem.Substring(0, [Math]::Min($stem.Length, [Math]::Max($digits.Length, 8) + 5))
+    if ($longer -match '^\d+$') { return '' }
+    return (" All digits is read as an Index, and there is no #{0}; it is also how {1} starts, so give more of it: -{2} {3}" -f $digits, $hit.File, $Mode, $longer)
 }
 
 function Get-ShownTitle {
@@ -2047,6 +2197,9 @@ foreach ($dir in $ProjectDirs) {
             Session  = $data.CustomTitle
             AiTitle  = $data.AiTitle
             Found    = $found
+            # Folder is relative and for reading; this is the recorded cwd
+            # itself, which resuming the session needs.
+            Cwd      = $data.Cwd
             File     = $file.Name
             Modified = $file.LastWriteTime
             # Rounded up, like Format-Size, so the table and the delete
@@ -2178,7 +2331,7 @@ if ($Delete) {
                 Write-Host ("    Get-ClaudeCodeSessions -Delete {0}    # *{1}  in {2}" -f $s.Index, $s.AiTitle, $s.Folder)
             }
         } else {
-            Write-Warning "No session matched -Delete '$Delete'."
+            Write-Warning ("No session matched -Delete '$Delete'." + (Get-DigitsHint $Sessions $Delete 'Delete'))
         }
         Write-Host ''
         return
@@ -2609,12 +2762,59 @@ if ($Delete) {
     return
 }
 
+# ---- Resume a session ------------------------------------------------------
+
+if ($Resume) {
+    # Same selection as -Open, generated titles included, but exactly one
+    # session: resuming is not something to do to a list.
+    $matched = @(Select-BySelector -Candidates $Sessions -Selector $Resume -WithAiTitles)
+    if ($matched.Count -eq 0) {
+        Write-Error ("No session matched -Resume '$Resume'." + (Get-DigitsHint $Sessions $Resume 'Resume'))
+        Write-Host ''
+        return
+    }
+    if ($matched.Count -gt 1) {
+        Write-Warning ("'{0}' matches {1} sessions, and -Resume opens one. Pick it by index:" -f $Resume, $matched.Count)
+        foreach ($m in $matched) {
+            $pick = if ($null -ne $m.Index) { $m.Index } else { [IO.Path]::GetFileNameWithoutExtension($m.File) }
+            Write-Host ("    Get-ClaudeCodeSessions -Resume {0}    # {1}  in {2}" -f $pick, (Get-ShownTitle $m), $m.Folder)
+        }
+        Write-Host ''
+        return
+    }
+    $s  = $matched[0]
+    $rt = Get-ResumeTarget -Row $s -LiveIds @(Get-RunningSessionId)
+    # A registry entry that cannot be read could be this very session.
+    $unknownLive = @(Get-UnknownRunningSession)
+    $what = '[{0}] {1}' -f $(if ($null -ne $s.Index) { $s.Index } else { $s.File }), (Get-ShownTitle $s)
+    $why  = if ($rt.Problem) { $rt.Problem }
+            elseif ($rt.Running) { 'it is running right now in another window. Switch to that one: two windows on one session would both write its transcript' }
+            elseif ($unknownLive.Count) { "a running session's registry entry could not be read ({0}), so it is unknown whether this one is open somewhere. Try again in a moment" -f ($unknownLive -join ', ') }
+            elseif (-not (Get-Command claude -ErrorAction SilentlyContinue)) { 'claude is not on PATH. From a shell that has it: {0}' -f (Format-ResumeCommand $rt) }
+    if ($why) {
+        Write-Error ('Cannot resume {0}: {1}.' -f $what, $why)
+        Write-Host ''
+        return
+    }
+    Write-Host ''
+    Write-Host ("{0}Resuming {1}{2}" -f $Bold, $what, $Reset)
+    if ($rt.Subagent) { Write-Host ("{0}(the session this subagent belongs to){1}" -f $Dim, $Reset) }
+    Write-Host ("{0}> {1}{2}" -f $Dim, (Format-ResumeCommand $rt), $Reset)
+    Write-Host ''
+    # Into the folder first: Claude Code keeps a session under the project
+    # dir of the folder it ran in, and looks it up from where it starts. Back
+    # out when it exits, so this terminal ends up where it was.
+    Push-Location -LiteralPath $rt.Folder
+    try { & claude --resume $rt.Id } finally { Pop-Location }
+    return
+}
+
 # ---- Read a session --------------------------------------------------------
 
 if ($Open) {
     $matched = @(Select-BySelector -Candidates $Sessions -Selector $Open -WithAiTitles)
     if ($matched.Count -eq 0) {
-        Write-Error "No session matched -Open '$Open'."
+        Write-Error ("No session matched -Open '$Open'." + (Get-DigitsHint $Sessions $Open 'Open'))
         Write-Host ''
         return
     }
@@ -2646,22 +2846,13 @@ if ($Open) {
 
         # Ready to paste. The cd matters: Claude Code keeps a session under
         # the project dir of the folder it ran in, so start it from there.
-        $id = [IO.Path]::GetFileNameWithoutExtension($s.File)
-        $projDir = Split-Path (Split-Path $s.FullPath -Parent) -Leaf
-        $notes = @()
-        if ($isSub) {
-            $sidecar = Split-Path (Split-Path $s.FullPath -Parent) -Parent
-            $id = Split-Path $sidecar -Leaf
-            $projDir = Split-Path (Split-Path $sidecar -Parent) -Leaf
-            $notes += 'the session this subagent belongs to'
-        }
-        $resume = if (-not (Test-SessionId $id)) { '(not named like a session ID, so there is nothing to resume)' } else {
-            $where = Get-ResumeFolder -Cwd $full.Cwd -DirName $projDir
-            if (-not $where) { $notes += 'no recorded folder maps to its project dir; run it from where the session ran' }
-            elseif (-not (Test-Path -LiteralPath $where)) { $notes += 'that folder no longer exists' }
-            if ($liveIds -contains $id) { $notes += 'running now in another window' }
-            $cmd = if ($where) { "cd '{0}'; claude --resume {1}" -f ($where -replace "'", "''"), $id } else { "claude --resume $id" }
-            $cmd + $(if ($notes.Count) { '   (' + ($notes -join '; ') + ')' } else { '' })
+        $rt = Get-ResumeTarget -Row $s -LiveIds $liveIds
+        $resume = if (-not (Test-SessionId $rt.Id)) { "($($rt.Problem))" } else {
+            $notes = @()
+            if ($rt.Subagent) { $notes += 'the session this subagent belongs to' }
+            if ($rt.Problem)  { $notes += $rt.Problem }
+            if ($rt.Running)  { $notes += 'running now in another window' }
+            (Format-ResumeCommand $rt) + $(if ($notes.Count) { '   (' + ($notes -join '; ') + ')' } else { '' })
         }
 
         $header = @(
