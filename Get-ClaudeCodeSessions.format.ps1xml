@@ -71,7 +71,11 @@
                                 <PropertyName>Folder</PropertyName>
                             </TableColumnItem>
                             <TableColumnItem>
-                                <PropertyName>Session</PropertyName>
+                                <!-- Your /rename title; without one, the title
+                                     Claude Code generated (what the resume picker
+                                     shows), marked with a leading * so it never
+                                     passes for a name you gave it. -->
+                                <ScriptBlock>if ($_.Session) { $_.Session } elseif ($_.AiTitle) { '*' + $_.AiTitle }</ScriptBlock>
                             </TableColumnItem>
                             <TableColumnItem>
                                 <PropertyName>Index</PropertyName>
@@ -98,6 +102,102 @@
                                      'opus 5.5'. The 'claude-' prefix and an 8-digit
                                      date suffix are always dropped; a name that is
                                      not then family-major[-minor] is shown as is. -->
+                                <ScriptBlock>
+                                    $m = $_.Model -replace '^claude-', '' -replace '-\d{8}$', ''
+                                    if ($m -match '^([a-z]+)-(\d+)(?:-(\d+))?$') {
+                                        $Matches[1] + ' ' + $Matches[2] + $(if ($Matches[3]) { '.' + $Matches[3] })
+                                    } else { $m }
+                                </ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>File</PropertyName>
+                            </TableColumnItem>
+                        </TableColumnItems>
+                    </TableRowEntry>
+                </TableRowEntries>
+            </TableControl>
+        </View>
+        <!-- -Search rows: the session table plus Found, where the phrase is
+             (title, folder, you, Claude, tools, files, other), right after
+             the Session it belongs to. A format file cannot share columns
+             between views, so the rest repeats CCSession. -->
+        <View>
+            <Name>CCSessionSearch</Name>
+            <ViewSelectedBy>
+                <TypeName>CCSessionSearch</TypeName>
+            </ViewSelectedBy>
+            <TableControl>
+                <AutoSize/>
+                <TableHeaders>
+                    <TableColumnHeader>
+                        <Label>Index</Label>
+                        <Alignment>Right</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Folder</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Session</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Found</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Index</Label>
+                        <Alignment>Right</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Modified</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Size</Label>
+                        <Alignment>Right</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Context</Label>
+                        <Alignment>Right</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>Model</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                    <TableColumnHeader>
+                        <Label>File</Label>
+                        <Alignment>Left</Alignment>
+                    </TableColumnHeader>
+                </TableHeaders>
+                <TableRowEntries>
+                    <TableRowEntry>
+                        <TableColumnItems>
+                            <TableColumnItem>
+                                <PropertyName>Index</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>Folder</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <ScriptBlock>if ($_.Session) { $_.Session } elseif ($_.AiTitle) { '*' + $_.AiTitle }</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>Found</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <PropertyName>Index</PropertyName>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <ScriptBlock>$_.Modified.ToString('yyyy-MM-dd HH:mm:ss')</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <ScriptBlock>'{0:N0} KB' -f $_.Size</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
+                                <ScriptBlock>if ($null -ne $_.Context) { if ($_.Context -lt 1000) { '&lt;1k' } else { '{0}k' -f [math]::Round($_.Context / 1000, [MidpointRounding]::AwayFromZero) } }</ScriptBlock>
+                            </TableColumnItem>
+                            <TableColumnItem>
                                 <ScriptBlock>
                                     $m = $_.Model -replace '^claude-', '' -replace '-\d{8}$', ''
                                     if ($m -match '^([a-z]+)-(\d+)(?:-(\d+))?$') {

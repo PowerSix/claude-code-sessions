@@ -16,6 +16,12 @@
     (.claude.json, history.jsonl), and only then the directory name decoded,
     which is a guess: '-' stood for any character.
 
+    Session is the title you set with /rename.  A session you never named
+    shows the title Claude Code generated for it (its 'ai-title' records, the
+    text 'claude --resume' lists), with a * in front so it never passes for
+    one of yours.  On the objects, Session holds only yours and AiTitle the
+    generated one.
+
     Requires PowerShell 7.
 
     Four modes:
@@ -101,19 +107,42 @@
     and quotes as they are: the transcript stores them escaped, and both
     forms are tried, so -Search 'C:\work\api' finds a path.
 
+    A Found column says where the phrase is: title, folder (the folder the
+    session ran in), you (what you typed, queued prompts included), Claude,
+    tools (tool calls, their output, subagent work), files (files put into
+    the chat) and other (records this does not recognize). What Claude Code
+    adds on its own (instructions such as CLAUDE.md and the memory index,
+    reminders, request copies, its bookkeeping) is left out, because it is
+    injected into every session started in a folder: one word in a memory
+    file would match them all. The sessions dropped that way are counted
+    above the table; -Everywhere lists them.
+
+    With -Open, shows the turns that mention the phrase rather than the
+    first and last ones, each cut around the mention.
+
     Searching from inside a Claude Code session also matches that session,
     because the prompt holding the phrase is logged to its transcript.
     -Delete never deletes the running session, so the match is harmless.
+
+.PARAMETER Everywhere
+    With -Search, also count what Claude Code adds on its own, so sessions
+    whose only mention is in instructions, memory, reminders or its own
+    records are listed too, as 'auto N' in Found.
 
 .PARAMETER Open
     Select sessions and print their conversation. Selector forms:
       - Integer:   matches the Index column from the table view
       - Substring: matches the file name without .jsonl (a UUID fragment
                    is fine)
-      - Substring: matches the Session name (the title set with /rename)
+      - Substring: matches the Session title: yours, or the one Claude Code
+                   generated when you set none (the *title in the table)
       - '*':       every session currently listed
     Substring matches are literal and case-insensitive and may return
     several sessions, in which case each is printed in turn.
+
+    The header ends with a Resume line, ready to paste: it changes into the
+    folder the session ran in and runs 'claude --resume <id>', so a session
+    found here never has to be found again in the picker.
 
     Indexes are assigned after sorting and BEFORE every filter, -Search
     included, so '-Search x' shows the same Index a bare listing would.
@@ -136,6 +165,11 @@
     session at once: '*' requires at least one narrowing filter (-Search,
     -OlderThan, -SmallerThan or -Unnamed; -Limit does not count), and so
     does any fragment that happens to match every session.
+
+    Titles Claude Code generated never select anything for -Delete, so a
+    sweep like '-Delete delete' only takes titles you wrote. A fragment that
+    matches only generated titles is refused with their indexes, and the
+    plan names any it left out.
 
     The plan lists every part about to go (transcript, subagent transcripts,
     saved tool output, file snapshots and so on) with its real path, file
@@ -203,8 +237,9 @@
     abandoned sessions. 0 (default) disables the filter.
 
 .PARAMETER Unnamed
-    Keep only sessions with no custom title (the one set with /rename).
-    Combines with the other filters.
+    Keep only sessions you never named with /rename; they may still show
+    the title Claude Code generated, as *title. Combines with the other
+    filters.
 
 .PARAMETER Limit
     Show only the first N rows left after the filters, in table order (by
@@ -259,6 +294,11 @@
     Sessions that mention a path. Backslashes are matched as typed.
 
 .EXAMPLE
+    Get-ClaudeCodeSessions -Search 'staging migrate' -Open 4
+    Only the turns of session #4 that mention the phrase, each cut around
+    the mention, then paste the Resume line to carry on with it.
+
+.EXAMPLE
     Get-ClaudeCodeSessions | Where-Object Size -lt 5
     Tiny or abandoned sessions - cleanup candidates.
 
@@ -285,6 +325,8 @@ param(
     [Parameter()]
     [string]$Search,
 
+    [switch]$Everywhere,
+
     [ArgumentCompleter({
         param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
 
@@ -299,6 +341,7 @@ param(
         $cache = Get-Variable -Name CCSessionTitleCache -Scope Global -ValueOnly -ErrorAction SilentlyContinue
         if ($cache -isnot [hashtable]) { $cache = @{}; $global:CCSessionTitleCache = $cache }
         $titles = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+        $aiTitles = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
         $files  = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
         $seen   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $homePath = $env:USERPROFILE.TrimEnd('\')
@@ -308,11 +351,15 @@ param(
                 # Title lookups read whole transcripts, so cache them keyed by
                 # path and invalidate on LastWriteTime.
                 $entry = $cache[$file.FullName]
-                if (-not $entry -or $entry.Mtime -ne $file.LastWriteTimeUtc.Ticks -or -not $entry.ContainsKey('Folder')) {
-                    $title = ''
-                    foreach ($h in (Select-String -LiteralPath $file.FullName -Pattern 'custom-title' -ErrorAction SilentlyContinue)) {
-                        try { $t = [string]($h.Line | ConvertFrom-Json -ErrorAction Stop).customTitle } catch { continue }
-                        if ($t) { $title = $t }
+                if (-not $entry -or $entry.Mtime -ne $file.LastWriteTimeUtc.Ticks -or -not $entry.ContainsKey('AiTitle')) {
+                    $title = ''; $aiTitle = ''
+                    # Both title records, the last of each winning. A line that
+                    # merely quotes one is JSON-escaped, so it never carries
+                    # this unescaped marker.
+                    foreach ($h in (Select-String -LiteralPath $file.FullName -Pattern '"type":"(custom|ai)-title"' -ErrorAction SilentlyContinue)) {
+                        try { $rec = $h.Line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+                        if ($rec.type -eq 'custom-title' -and $rec.customTitle) { $title = [string]$rec.customTitle }
+                        elseif ($rec.type -eq 'ai-title' -and $rec.aiTitle) { $aiTitle = [string]$rec.aiTitle }
                     }
                     # The folder for the tooltip comes from the recorded cwd:
                     # decoding the dir name is lossy ('-' was any character).
@@ -322,7 +369,7 @@ param(
                         $cwdPath = $cwdHit.Matches[0].Groups[1].Value -replace '\\\\', '\'
                         $folder = if ($cwdPath -ieq $homePath) { '\' } elseif ($cwdPath.StartsWith("$homePath\", [System.StringComparison]::OrdinalIgnoreCase)) { $cwdPath.Substring($homePath.Length) } else { $cwdPath }
                     }
-                    $entry = @{ Mtime = $file.LastWriteTimeUtc.Ticks; Title = $title; Folder = $folder }
+                    $entry = @{ Mtime = $file.LastWriteTimeUtc.Ticks; Title = $title; AiTitle = $aiTitle; Folder = $folder }
                     $cache[$file.FullName] = $entry
                 }
                 $when = $file.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
@@ -340,11 +387,21 @@ param(
                     }
                     $titles.Add([System.Management.Automation.CompletionResult]::new(
                         $completion, $title, 'ParameterValue', ("Session: {0}  ({1}, {2})" -f $title, $entry.Folder, $when)))
+                } elseif (-not $title -and $entry.AiTitle -and (-not $word -or $entry.AiTitle.IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and $seen.Add($entry.AiTitle)) {
+                    # Generated titles too, listed as *title like the table.
+                    # What gets inserted is the plain title, which -Open matches
+                    # (-Delete does not, so its completer leaves these out).
+                    $ai = $entry.AiTitle
+                    $completion = if ($ai -match '^[\w.][\w.-]*$') { $ai } else {
+                        "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($ai) + "'"
+                    }
+                    $aiTitles.Add([System.Management.Automation.CompletionResult]::new(
+                        $completion, "*$ai", 'ParameterValue', ("Generated title: {0}  ({1}, {2})" -f $ai, $entry.Folder, $when)))
                 }
             }
         }
         $out = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
-        $out.AddRange($titles); $out.AddRange($files)
+        $out.AddRange($titles); $out.AddRange($aiTitles); $out.AddRange($files)
         return $out
     })]
     [string]$Open,
@@ -379,11 +436,15 @@ param(
             foreach ($file in Get-ChildItem -LiteralPath $dir.FullName -Filter *.jsonl -File -Force -ErrorAction SilentlyContinue) {
                 $stem = $file.BaseName
                 $entry = $cache[$file.FullName]
-                if (-not $entry -or $entry.Mtime -ne $file.LastWriteTimeUtc.Ticks -or -not $entry.ContainsKey('Folder')) {
-                    $title = ''
-                    foreach ($h in (Select-String -LiteralPath $file.FullName -Pattern 'custom-title' -ErrorAction SilentlyContinue)) {
-                        try { $t = [string]($h.Line | ConvertFrom-Json -ErrorAction Stop).customTitle } catch { continue }
-                        if ($t) { $title = $t }
+                if (-not $entry -or $entry.Mtime -ne $file.LastWriteTimeUtc.Ticks -or -not $entry.ContainsKey('AiTitle')) {
+                    $title = ''; $aiTitle = ''
+                    # Both title records, the last of each winning. A line that
+                    # merely quotes one is JSON-escaped, so it never carries
+                    # this unescaped marker.
+                    foreach ($h in (Select-String -LiteralPath $file.FullName -Pattern '"type":"(custom|ai)-title"' -ErrorAction SilentlyContinue)) {
+                        try { $rec = $h.Line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+                        if ($rec.type -eq 'custom-title' -and $rec.customTitle) { $title = [string]$rec.customTitle }
+                        elseif ($rec.type -eq 'ai-title' -and $rec.aiTitle) { $aiTitle = [string]$rec.aiTitle }
                     }
                     # The folder for the tooltip comes from the recorded cwd:
                     # decoding the dir name is lossy ('-' was any character).
@@ -393,7 +454,7 @@ param(
                         $cwdPath = $cwdHit.Matches[0].Groups[1].Value -replace '\\\\', '\'
                         $folder = if ($cwdPath -ieq $homePath) { '\' } elseif ($cwdPath.StartsWith("$homePath\", [System.StringComparison]::OrdinalIgnoreCase)) { $cwdPath.Substring($homePath.Length) } else { $cwdPath }
                     }
-                    $entry = @{ Mtime = $file.LastWriteTimeUtc.Ticks; Title = $title; Folder = $folder }
+                    $entry = @{ Mtime = $file.LastWriteTimeUtc.Ticks; Title = $title; AiTitle = $aiTitle; Folder = $folder }
                     $cache[$file.FullName] = $entry
                 }
                 $when = $file.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
@@ -484,7 +545,8 @@ ${Bold}FOUR MODES${Reset}
 ${Bold}SELECTORS${Reset} (for -Open and -Delete)
   ${Cyan}23${Reset}          the Index column from the table
   ${Cyan}d4e5f6a7${Reset}    a fragment of the file name / UUID
-  ${Cyan}my-app${Reset}      a fragment of the Session name (set with /rename)
+  ${Cyan}my-app${Reset}      a fragment of the Session title. -Open also matches the
+              *titles Claude Code generated; -Delete never does.
   ${Cyan}*${Reset}           everything currently listed. With -Delete it needs a filter
               first, and so does a fragment that matches every session.
   Indexes shift when a session is added, removed or written to (the table is
@@ -492,18 +554,24 @@ ${Bold}SELECTORS${Reset} (for -Open and -Delete)
 
 ${Bold}FILTERS${Reset} (combine freely, they AND together)
   ${Cyan}-Search${Reset} <string>     literal, case-insensitive search inside transcripts;
-                       backslashes and quotes are matched as typed
+                       backslashes and quotes are matched as typed. A Found
+                       column says where: title, folder, you, Claude, tools,
+                       files. What Claude Code adds on its own is left out.
+  ${Cyan}-Everywhere${Reset}          with -Search, count that too (instructions, memory)
   ${Cyan}-OlderThan${Reset} <N>       only sessions older than N days
   ${Cyan}-SmallerThan${Reset} <N>     only sessions under N KB
-  ${Cyan}-Unnamed${Reset}             only sessions with no custom title (/rename)
+  ${Cyan}-Unnamed${Reset}             only sessions you never named with /rename
   ${Cyan}-Limit${Reset} <N>           the first N rows left, in table order (not the N newest)
 
 ${Bold}READING${Reset}
   ${Cyan}-Turns${Reset} <N>           turns from each end of the conversation (default 10,
                        0 = all). A ${Dim}... [X turns omitted] ...${Reset} marker shows the gap.
   ${Cyan}-MaxChars${Reset} <N>        truncate each turn to N chars (default 600, 0 = full)
+  With -Search, -Open shows only the turns that mention the phrase, cut
+  around the mention. The header's Resume line is ready to paste.
 
 ${Bold}COLUMNS${Reset}
+  ${Cyan}Session${Reset}              your /rename title, else *the one Claude Code generated
   ${Cyan}Size${Reset}                 the transcript file alone. -Delete shows the rest it owns.
   ${Cyan}Context${Reset}              tokens in context as of the last reply, counted the way
                        Claude Code counts it. Over 200k it only fits a 1M window,
@@ -558,6 +626,7 @@ ${Bold}EXAMPLES${Reset}
   Get-ClaudeCodeSessions -Open d4e5f6a7 -Turns 0
   Get-ClaudeCodeSessions -Search "database migration"
   Get-ClaudeCodeSessions -Search 'C:\work\api'
+  Get-ClaudeCodeSessions -Search 'staging migrate' -Open 4
   Get-ClaudeCodeSessions | Where-Object Context -gt 200000
   Get-ClaudeCodeSessions -Delete 23
   Get-ClaudeCodeSessions -Delete delete
@@ -581,10 +650,14 @@ if ($Open -and $Delete) {
     return
 }
 
-if ($Orphans -and ($Open -or $Search -or $OlderThan -or $SmallerThan -or $Unnamed -or $Limit -or $IncludeSubagents)) {
+if ($Orphans -and ($Open -or $Search -or $Everywhere -or $OlderThan -or $SmallerThan -or $Unnamed -or $Limit -or $IncludeSubagents)) {
     Write-Error '-Orphans works on its own, or with -Delete to remove what it lists. Session filters do not apply to it.'
     Write-Host ''
     return
+}
+
+if ($Everywhere -and -not $Search) {
+    Write-Warning '-Everywhere only changes what -Search counts, so it does nothing on its own.'
 }
 
 # ---- Helpers ---------------------------------------------------------------
@@ -611,12 +684,14 @@ function Get-MessageText {
 function Get-SessionData {
     # Returns a hashtable: .Turns (list of user/assistant turns, left empty
     # with -Light or -CwdOnly), .Cwd (cwd of the first turn), .CustomTitle
-    # (string or empty), .Context (tokens or $null), .Model (string or empty)
-    # and .ReadError ($true when the file could not be opened, so everything
-    # else is unknown, not empty). The custom title is set by the user via
-    # /rename in Claude Code and is recorded as 'custom-title' lines in the
-    # session JSONL. The same title can appear multiple times if it was
-    # changed; we keep the LAST one we see.
+    # (string or empty), .AiTitle (the title Claude Code generates, or empty),
+    # .Context (tokens or $null), .Model (string or empty) and .ReadError
+    # ($true when the file could not be opened, so everything else is unknown,
+    # not empty). The custom title is set by the user via /rename in Claude
+    # Code and is recorded as 'custom-title' lines in the session JSONL; the
+    # generated one is 'ai-title' lines, which the resume picker shows when
+    # there is no custom title. Both are rewritten as a session goes on, so
+    # the LAST of each wins.
     #
     # Lines are streamed with FileShare.ReadWrite, never through Get-Content,
     # which decorates every line with provider properties: on a few hundred MB
@@ -654,13 +729,15 @@ function Get-SessionData {
     # it and fail to accept a List.
     $turnList = New-Object System.Collections.Generic.List[object]
     $customTitle = ''
+    $aiTitle = ''
+    $lastAiLine = $null
     $context = $null
     $model = ''
     $firstCwd = $null
     $wantTurns = -not ($Light -or $CwdOnly)
 
     if ([string]::IsNullOrWhiteSpace($JsonlPath)) {
-        return @{ Turns = $turnList; Cwd = $null; CustomTitle = ''; Context = $null; Model = ''; ReadError = $false }
+        return @{ Turns = $turnList; Cwd = $null; CustomTitle = ''; AiTitle = ''; Context = $null; Model = ''; ReadError = $false }
     }
 
     $triage = $true
@@ -668,7 +745,7 @@ function Get-SessionData {
         try {
             $sr = [IO.StreamReader]::new([IO.FileStream]::new($JsonlPath, 'Open', 'Read', 'ReadWrite'))
         } catch {
-            return @{ Turns = $turnList; Cwd = $null; CustomTitle = ''; Context = $null; Model = ''; ReadError = $true }
+            return @{ Turns = $turnList; Cwd = $null; CustomTitle = ''; AiTitle = ''; Context = $null; Model = ''; ReadError = $true }
         }
         $readAny = $false; $recognized = 0
         try {
@@ -677,7 +754,23 @@ function Get-SessionData {
                 if ($triage) {
                     $isAsst = $line.Contains('"type":"assistant"')
                     $isUser = $line.Contains('"type":"user"')
-                    if (-not ($isAsst -or $isUser -or $line.Contains('"type":"custom-title"') -or $line.Contains('"compact_boundary"'))) { continue }
+                    if (-not ($isAsst -or $isUser)) {
+                        # In this loop every extra string test on every line
+                        # costs more than it saves, so both title kinds share
+                        # one test ('-title"'), and lines that are neither do
+                        # exactly the two tests they always did. The generated
+                        # title is rewritten all session long, often hundreds
+                        # of records, and only the last counts: keep that line
+                        # and parse it once after the loop.
+                        if ($line.Contains('-title"')) {
+                            if ($line.Contains('"type":"ai-title"')) {
+                                if (-not $line.Contains('"aiTitle":""')) { $lastAiLine = $line }
+                                $recognized++
+                                continue
+                            }
+                            if (-not ($line.Contains('"type":"custom-title"') -or $line.Contains('"compact_boundary"'))) { continue }
+                        } elseif (-not $line.Contains('"compact_boundary"')) { continue }
+                    }
                     $recognized++
                     # User records cannot change the title, context or model.
                     # A line carrying the assistant marker is always parsed.
@@ -690,6 +783,10 @@ function Get-SessionData {
 
                 if ($obj.type -eq 'custom-title' -and $obj.customTitle) {
                     $customTitle = [string]$obj.customTitle
+                    continue
+                }
+                if ($obj.type -eq 'ai-title' -and $obj.aiTitle) {
+                    $aiTitle = [string]$obj.aiTitle
                     continue
                 }
 
@@ -744,15 +841,171 @@ function Get-SessionData {
         } catch {
             # Failed partway through: what was read is not the whole story.
             # Keep the cwd (it decides Folder, and so the Index) and nothing else.
-            return @{ Turns = $turnList; Cwd = $firstCwd; CustomTitle = ''; Context = $null; Model = ''; ReadError = $true }
+            return @{ Turns = $turnList; Cwd = $firstCwd; CustomTitle = ''; AiTitle = ''; Context = $null; Model = ''; ReadError = $true }
         } finally {
             $sr.Dispose()
         }
         if ($triage -and $readAny -and $recognized -eq 0) { $triage = $false; continue }
         break
     }
+    if ($lastAiLine) {
+        try { $t = ($lastAiLine | ConvertFrom-Json -AsHashtable -ErrorAction Stop)['aiTitle']; if ($t) { $aiTitle = [string]$t } } catch { }
+    }
 
-    return @{ Turns = $turnList; Cwd = $firstCwd; CustomTitle = $customTitle; Context = $context; Model = $model; ReadError = $false }
+    return @{ Turns = $turnList; Cwd = $firstCwd; CustomTitle = $customTitle; AiTitle = $aiTitle; Context = $context; Model = $model; ReadError = $false }
+}
+
+function Test-HasPhrase {
+    # Case-insensitive substring anywhere in a parsed JSON value: a string,
+    # or any string inside nested hashtables and arrays (keys are not text).
+    param($Node, [string]$Phrase)
+    if ($null -eq $Node) { return $false }
+    if ($Node -is [string]) { return $Node.IndexOf($Phrase, [StringComparison]::OrdinalIgnoreCase) -ge 0 }
+    if ($Node -is [System.Collections.IDictionary]) {
+        foreach ($v in $Node.Values) { if (Test-HasPhrase $v $Phrase) { return $true } }
+        return $false
+    }
+    if ($Node -is [System.Collections.IEnumerable]) {
+        foreach ($v in $Node) { if (Test-HasPhrase $v $Phrase) { return $true } }
+        return $false
+    }
+    return ([string]$Node).IndexOf($Phrase, [StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
+function Get-HitKind {
+    # Which bucket(s) of Get-SearchHits one record containing the phrase
+    # belongs to. One record can land in two: a reply that both says the
+    # phrase and passes it to a tool counts for Claude and for tools.
+    param([hashtable]$Rec, [string]$Phrase)
+    $own  = @('api-request-blob', 'api-request', 'api-request-shape', 'last-prompt', 'queue-operation', 'system', 'mode',
+              'permission-mode', 'atis-latch', 'tools-used', 'cost-state', 'file-history-snapshot', 'file-history-delta', 'continued-in')
+    $tags = '(?s)<(system-reminder|local-command-caveat|task-notification)>.*?</\1>'
+    $type = [string]$Rec['type']
+    $kinds = New-Object System.Collections.Generic.List[string]
+
+    if ($type -in 'ai-title', 'custom-title', 'agent-name') { return 'title' }
+    if ($own -contains $type) { return 'auto' }
+    if ($type -eq 'attachment') {
+        $a   = $Rec['attachment']
+        $sub = if ($a -is [System.Collections.IDictionary]) { [string]$a['type'] } else { '' }
+        # Typed while Claude was busy: origin human, delivered as an attachment.
+        if ($sub -eq 'queued_command' -and (Test-HasPhrase $a['prompt'] $Phrase)) { return 'you' }
+        if ($sub -eq 'file' -and (Test-HasPhrase $a $Phrase)) { return 'files' }
+        if ($sub -notin 'queued_command', 'file' -and (Test-HasPhrase $a $Phrase)) { return 'auto' }
+    } elseif ($type -eq 'user' -or $type -eq 'assistant') {
+        $msg     = $Rec['message']
+        $content = if ($msg -is [System.Collections.IDictionary]) { $msg['content'] } else { $null }
+        if ($Rec['isMeta'] -or $Rec['isCompactSummary']) {
+            if (Test-HasPhrase $content $Phrase) { return 'auto' }
+        } elseif ($Rec['isSidechain']) {
+            # Inline subagent turns: work done for the session, not the chat.
+            if ((Test-HasPhrase $content $Phrase) -or (Test-HasPhrase $Rec['toolUseResult'] $Phrase)) { return 'tools' }
+        } elseif ($type -eq 'assistant') {
+            foreach ($blk in @($content)) {
+                if ($blk -isnot [System.Collections.IDictionary] -or -not (Test-HasPhrase $blk $Phrase)) { continue }
+                $k = if ($blk['type'] -in 'text', 'thinking') { 'Claude' } else { 'tools' }
+                if (-not $kinds.Contains($k)) { $kinds.Add($k) }
+            }
+        } else {
+            $parts = if ($content -is [string]) { , @{ type = 'text'; text = $content } } else { @($content) }
+            foreach ($blk in $parts) {
+                if ($blk -isnot [System.Collections.IDictionary]) { continue }
+                if ($blk['type'] -eq 'text') {
+                    $k = if (Test-HasPhrase ([string]$blk['text'] -replace $tags, '') $Phrase) { 'you' }
+                         elseif (Test-HasPhrase $blk['text'] $Phrase) { 'auto' } else { $null }
+                } elseif ($blk['type'] -eq 'tool_result') {
+                    $k = if (Test-HasPhrase $blk $Phrase) { 'tools' } else { $null }
+                } else { $k = $null }
+                if ($k -and -not $kinds.Contains($k)) { $kinds.Add($k) }
+            }
+            if (-not $kinds.Contains('tools') -and (Test-HasPhrase $Rec['toolUseResult'] $Phrase)) { $kinds.Add('tools') }
+        }
+        if ($kinds.Count) { return [string[]]$kinds }
+    }
+    # Not in the payload. In the cwd every record carries, it says where the
+    # session ran; anywhere else it is something this does not know, which
+    # is listed rather than hidden.
+    if (Test-HasPhrase $Rec['cwd'] $Phrase) { return 'folder' }
+    return 'other'
+}
+
+function Get-SearchHits {
+    # Where a -Search phrase occurs in one transcript, counted by kind of
+    # record. The raw JSONL also holds text Claude Code adds on its own:
+    # every session started in a folder carries that folder's CLAUDE.md and
+    # memory index as an 'instructions' attachment, plus a copy of the first
+    # request, so a word from a memory file "matches" every session there.
+    #   title   ai-title, custom-title or agent-name records
+    #   folder  only in a record's cwd: the session ran in a matching folder
+    #   you     your prompts (injected tags stripped), and prompts queued
+    #           while Claude was busy (queued_command attachments)
+    #   Claude  text Claude wrote
+    #   tools   tool calls and their output, and inline subagent turns
+    #   files   file attachments: files put into the conversation
+    #   other   records this does not recognize, and lines that do not parse
+    #   auto    what Claude Code adds or keeps on its own: every other
+    #           attachment (instructions, memory, reminders, hook output),
+    #           meta records, request copies and its bookkeeping records
+    # -RawPatterns are the phrase as typed and JSON-escaped: they pick the
+    # lines worth parsing, then the parsed values are checked for the phrase.
+    param([string]$JsonlPath, [string]$Phrase, [string[]]$RawPatterns)
+    $b = [ordered]@{ title = 0; folder = 0; you = 0; Claude = 0; tools = 0; files = 0; other = 0; auto = 0 }
+    try { $sr = [IO.StreamReader]::new([IO.FileStream]::new($JsonlPath, 'Open', 'Read', 'ReadWrite')) } catch { return @{ Buckets = $b; ReadError = $true } }
+    try {
+        while ($null -ne ($line = $sr.ReadLine())) {
+            $isHit = $false
+            foreach ($rp in $RawPatterns) { if ($line.IndexOf($rp, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $isHit = $true; break } }
+            if (-not $isHit) { continue }
+            try { $rec = $line | ConvertFrom-Json -AsHashtable -ErrorAction Stop } catch { $b['other']++; continue }
+            if ($rec -isnot [hashtable]) { $b['other']++; continue }
+            foreach ($k in @(Get-HitKind -Rec $rec -Phrase $Phrase)) { $b[$k]++ }
+        }
+    } catch {
+        return @{ Buckets = $b; ReadError = $true }
+    } finally {
+        $sr.Dispose()
+    }
+    return @{ Buckets = $b; ReadError = $false }
+}
+
+function Format-Found {
+    # The Found column: "title, you 2, Claude 3, tools 33". Title and folder
+    # are yes/no; auto shows only with -Everywhere.
+    param($Buckets, [switch]$WithAuto)
+    $parts = foreach ($k in 'title', 'folder', 'you', 'Claude', 'tools', 'files', 'other', 'auto') {
+        if (-not $Buckets[$k] -or ($k -eq 'auto' -and -not $WithAuto)) { continue }
+        if ($k -in 'title', 'folder') { $k } else { '{0} {1}' -f $k, $Buckets[$k] }
+    }
+    return (@($parts) -join ', ')
+}
+
+function Get-Excerpt {
+    # The part of a turn around the first mention of a phrase, at most $Max
+    # characters, so a hit deep inside a long turn is still on screen. Cut on
+    # whole UTF-16 pairs at both ends, with ... wherever text was dropped.
+    param([string]$Text, [string]$Phrase, [int]$Max)
+    if ($Max -le 0 -or $Text.Length -le $Max) { return $Text }
+    $at = $Text.IndexOf($Phrase, [StringComparison]::OrdinalIgnoreCase)
+    if ($at -lt 0) { return (Format-TurnText -Text $Text -Max $Max) }
+    $half  = [Math]::Max(0, [int][Math]::Floor(($Max - $Phrase.Length) / 2))
+    $start = [Math]::Min([Math]::Max(0, $at - $half), [Math]::Max(0, $Text.Length - $Max))
+    if ($start -gt 0 -and [char]::IsLowSurrogate($Text[$start])) { $start++ }
+    $cut  = Limit-Text $Text.Substring($start) $Max
+    $pre  = if ($start -gt 0) { '...' } else { '' }
+    $post = if ($start + $cut.Length -lt $Text.Length) { '...' } else { '' }
+    return $pre + $cut + $post
+}
+
+function Get-ResumeFolder {
+    # Where to start 'claude --resume <id>': a folder whose encoding is this
+    # transcript's project dir, which is where Claude Code keeps it. The
+    # first turn's cwd normally is one; the recorded origins are the
+    # fallback. $null when nothing recorded maps to that dir.
+    param([string]$Cwd, [string]$DirName)
+    if ($Cwd -and (ConvertTo-ProjectDirName $Cwd) -eq $DirName) { return $Cwd }
+    if ($null -eq $script:OriginCache) { $script:OriginCache = Get-ProjectOrigin }
+    if ($script:OriginCache.ByDir.ContainsKey($DirName)) { return $script:OriginCache.ByDir[$DirName][0] }
+    return $null
 }
 
 function ConvertTo-FolderLabel {
@@ -819,21 +1072,32 @@ function Select-TurnsForDisplay {
 }
 
 function Write-TurnBlock {
-    param($Turn, [int]$Max)
+    # -Phrase (from -Search): show the stretch around the first mention, not
+    # the start of the turn, and mark every mention when colors are on.
+    param($Turn, [int]$Max, [string]$Phrase)
     if ($Turn.Role -eq 'user') {
         $color = $Blue;   $label = '[USER]'
     } else {
         $color = $Yellow; $label = '[CLAUDE]'
     }
     Write-Output ("{0}{1} {2}{3}" -f $color, $label, (Format-Timestamp $Turn.Timestamp), $Reset)
-    Write-Output (Format-TurnText -Text $Turn.Text -Max $Max)
+    if ($Phrase) {
+        $text = Get-Excerpt -Text $Turn.Text -Phrase $Phrase -Max $Max
+        if ($Reset) { $text = $text -replace [regex]::Escape($Phrase), { "$Esc[7m$($_.Value)$Esc[27m" } }
+        Write-Output $text
+    } else {
+        Write-Output (Format-TurnText -Text $Turn.Text -Max $Max)
+    }
     Write-Output ''
 }
 
 function Select-BySelector {
     # Shared matching for -Open and -Delete: index, or substring of filename
-    # or custom title. '*' means "the whole current set".
-    param([object]$Candidates, [string]$Selector)
+    # or custom title. '*' means "the whole current set". -WithAiTitles also
+    # matches the title Claude Code generated, the *title the table shows
+    # when there is no /rename title. -Open passes it; -Delete never does, so
+    # a sweep like '-Delete delete' only takes titles you wrote yourself.
+    param([object]$Candidates, [string]$Selector, [switch]$WithAiTitles)
     # [object[]] rather than @() - see the note in Select-TurnsForDisplay.
     $list = @()
     if ($null -ne $Candidates) { $list = [object[]]$Candidates }
@@ -850,9 +1114,19 @@ function Select-BySelector {
     # "any title containing W, I or P". The stem, not the file name, or
     # 'jsonl' and '.' would match every session.
     return @($list | Where-Object {
+        # The title as shown: yours, or the generated one when you set none.
+        $shownTitle = if ($_.Session) { [string]$_.Session } elseif ($WithAiTitles -and $_.PSObject.Properties['AiTitle']) { [string]$_.AiTitle } else { '' }
         [IO.Path]::GetFileNameWithoutExtension($_.File).IndexOf($Selector, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        ($_.Session -and ([string]$_.Session).IndexOf($Selector, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+        ($shownTitle -and $shownTitle.IndexOf($Selector, [StringComparison]::OrdinalIgnoreCase) -ge 0)
     })
+}
+
+function Get-ShownTitle {
+    # A session's title as the table shows it: yours, else *generated.
+    param($Row, [string]$None = '(unnamed)')
+    if ($Row.Session) { return [string]$Row.Session }
+    if ($Row.PSObject.Properties['AiTitle'] -and $Row.AiTitle) { return '*' + $Row.AiTitle }
+    return $None
 }
 
 function Get-RunningSession {
@@ -1707,15 +1981,19 @@ $Sessions = New-Object System.Collections.Generic.List[object]
 $Misses   = New-Object System.Collections.Generic.List[object]
 $Unreadable = New-Object System.Collections.Generic.List[string]
 
-# -Search runs on the raw JSONL, where a backslash is stored as \\ and a
-# quote as \". So the phrase is also tried in that escaped form, or any path
-# search (the most natural kind) would find nothing.
+# -Search picks lines from the raw JSONL, where a backslash is stored as \\
+# and a quote as \". So the phrase is also tried in that escaped form, or any
+# path search (the most natural kind) would find nothing. Get-SearchHits then
+# decides from the parsed record what kind of text holds the phrase.
 $SearchPatterns = @()
 if ($Search) {
     $SearchPatterns = @($Search)
     $escaped = $Search.Replace('\', '\\').Replace('"', '\"')
     if ($escaped -cne $Search) { $SearchPatterns += $escaped }
 }
+# Sessions whose only mention is in what Claude Code adds on its own: hidden
+# unless -Everywhere, but counted, so nothing is dropped without saying so.
+$AutoOnly = 0
 
 foreach ($dir in $ProjectDirs) {
     # Never -Filter for these: on a dir that cannot be listed, Get-ChildItem
@@ -1735,11 +2013,15 @@ foreach ($dir in $ProjectDirs) {
 
     foreach ($file in $files) {
         $isSub = Test-SubagentPath $file.FullName
+        $found = $null
         if ($Search) {
-            $searchErr = $null
-            $hit = Select-String -LiteralPath $file.FullName -Pattern $SearchPatterns -SimpleMatch -List -ErrorAction SilentlyContinue -ErrorVariable searchErr
-            if ($searchErr) { $Unreadable.Add($file.FullName) }
-            if (-not $hit) {
+            $sh = Get-SearchHits -JsonlPath $file.FullName -Phrase $Search -RawPatterns $SearchPatterns
+            if ($sh.ReadError) { $Unreadable.Add($file.FullName) }
+            $visibleHits = 0; foreach ($k in $sh.Buckets.Keys) { if ($k -ne 'auto') { $visibleHits += $sh.Buckets[$k] } }
+            if ($Everywhere) { $visibleHits += $sh.Buckets['auto'] }
+            elseif (-not $visibleHits -and $sh.Buckets['auto']) { $AutoOnly++ }
+            if ($visibleHits) { $found = Format-Found $sh.Buckets -WithAuto:$Everywhere }
+            if (-not $visibleHits) {
                 $probe = Get-SessionData -JsonlPath $file.FullName -CwdOnly -Subagent:$isSub
                 if ($probe.ReadError -and $Unreadable -notcontains $file.FullName) { $Unreadable.Add($file.FullName) }
                 $Misses.Add([PSCustomObject]@{
@@ -1759,7 +2041,12 @@ foreach ($dir in $ProjectDirs) {
 
         $Sessions.Add([PSCustomObject]@{
             Folder   = Resolve-FolderLabel -Cwd $data.Cwd -DirName $dir.Name
+            # Session is the /rename title only, so selectors, -Unnamed and
+            # the pipeline keep meaning "the title you set". The view shows
+            # AiTitle as *title when Session is empty, as the picker does.
             Session  = $data.CustomTitle
+            AiTitle  = $data.AiTitle
+            Found    = $found
             File     = $file.Name
             Modified = $file.LastWriteTime
             # Rounded up, like Format-Size, so the table and the delete
@@ -1782,6 +2069,10 @@ if ($ListErr) {
 if ($Unreadable.Count) {
     Write-Warning ("{0} transcript(s) could not be read (another program may hold them locked), so their title, context and model are unknown: {1}" -f
         $Unreadable.Count, (@($Unreadable | ForEach-Object { Split-Path $_ -Leaf }) -join ', '))
+}
+if ($AutoOnly) {
+    Write-Host ("{0}{1} more session(s) mention '{2}' only in what Claude Code adds on its own (instructions, memory, its own records). Add -Everywhere to list them.{3}" -f
+        $Dim, $AutoOnly, $Search, $Reset)
 }
 
 # Assign stable indexes BEFORE the selectors and filters run, -Search
@@ -1874,8 +2165,21 @@ if ($Delete) {
     # @() so .Count is reliable: a function's output is unrolled, so a single
     # match would otherwise arrive as a bare object rather than a 1-item array.
     $targets = @(Select-BySelector -Candidates $Sessions -Selector $Delete)
+    # Titles Claude Code generated (*) are never -Delete selectors, but a
+    # fragment that would have matched one is reported, never ignored quietly.
+    $aiOnly = @()
+    if ($Delete -ne '*' -and $Delete -notmatch '^#?\d+$') {
+        $aiOnly = @(Select-BySelector -Candidates $Sessions -Selector $Delete -WithAiTitles | Where-Object { $targets -notcontains $_ })
+    }
     if ($targets.Count -eq 0) {
-        Write-Warning "No session matched -Delete '$Delete'."
+        if ($aiOnly.Count) {
+            Write-Warning ("'{0}' only matches title(s) Claude Code generated (*), and -Delete goes only by titles you set with /rename. Pick by index:" -f $Delete)
+            foreach ($s in $aiOnly) {
+                Write-Host ("    Get-ClaudeCodeSessions -Delete {0}    # *{1}  in {2}" -f $s.Index, $s.AiTitle, $s.Folder)
+            }
+        } else {
+            Write-Warning "No session matched -Delete '$Delete'."
+        }
         Write-Host ''
         return
     }
@@ -1918,7 +2222,7 @@ if ($Delete) {
             foreach ($g in $twins) {
                 Write-Warning ("'{0}' matches {1} copies of one session ({2}). Pick the copy by its index:" -f $Delete, $g.Count, $g.Name)
                 foreach ($s in $g.Group) {
-                    Write-Host ("    Get-ClaudeCodeSessions -Delete {0}    # {1}  in {2}" -f $s.Index, $(if ($s.Session) { $s.Session } else { '(unnamed)' }), $s.Folder)
+                    Write-Host ("    Get-ClaudeCodeSessions -Delete {0}    # {1}  in {2}" -f $s.Index, (Get-ShownTitle $s), $s.Folder)
                 }
             }
             Write-Host ''
@@ -1997,6 +2301,11 @@ if ($Delete) {
     $footprintByUuid = @{}
 
     Write-Host ''
+    if ($aiOnly.Count) {
+        Write-Host ("{0}Not included: {1} session(s) whose generated title (*) matches '{2}', since -Delete goes only by titles you set with /rename: {3}{4}" -f
+            $Dim, $aiOnly.Count, $Delete, (@($aiOnly | ForEach-Object { "[$($_.Index)] *$($_.AiTitle)" }) -join ', '), $Reset)
+        Write-Host ''
+    }
     Write-Host ("{0}The following {1} session(s) will be PERMANENTLY deleted:{2}" -f $Bold, $targets.Count, $Reset)
     $totalBytes = [long]0; $totalFiles = 0; $unreadable = 0
     foreach ($key in $groups.Keys) {
@@ -2004,7 +2313,7 @@ if ($Delete) {
         $isId   = Test-SessionId $key
         Write-Host ''
         foreach ($s in $copies) {
-            $name = if ($s.Session) { $s.Session } else { '(unnamed)' }
+            $name = Get-ShownTitle $s
             Write-Host ("  {0}[{1}] {2}{3}  in {4}" -f $Bold, $s.Index, $name, $Reset, $s.Folder)
             # An index can point somewhere new between a listing and a delete,
             # and '(unnamed)' tells two sessions apart badly: show what started it.
@@ -2072,7 +2381,7 @@ if ($Delete) {
                                 $tp  = $refs.By[$i]
                                 $who = @($AllSessions | Where-Object FullPath -eq $tp)[0]
                                 $label = if ($who) {
-                                    '[{0}] {1} in {2}{3}' -f $who.Index, $(if ($who.Session) { $who.Session } else { '(unnamed)' }), $who.Folder, $(if (& $isRunning $who) { ', running now' } else { '' })
+                                    '[{0}] {1} in {2}{3}' -f $who.Index, (Get-ShownTitle $who), $who.Folder, $(if (& $isRunning $who) { ', running now' } else { '' })
                                 } elseif ($tp) { Split-Path $tp -Leaf } else { 'another transcript' }
                                 $notes.Add(('  {0}  <- {1}' -f (ConvertTo-DisplayPath $cands[$i].Path), $label))
                             }
@@ -2303,30 +2612,73 @@ if ($Delete) {
 # ---- Read a session --------------------------------------------------------
 
 if ($Open) {
-    $matched = @(Select-BySelector -Candidates $Sessions -Selector $Open)
+    $matched = @(Select-BySelector -Candidates $Sessions -Selector $Open -WithAiTitles)
     if ($matched.Count -eq 0) {
         Write-Error "No session matched -Open '$Open'."
         Write-Host ''
         return
     }
+    $liveIds = @(Get-RunningSessionId)
 
     foreach ($s in $matched) {
         # The scan read this session light; parse it fully now for its turns.
-        $full   = Get-SessionData -JsonlPath $s.FullPath -Subagent:(Test-SubagentPath $s.FullPath)
-        $picked = Select-TurnsForDisplay -SessionTurns $full.Turns -N $Turns
+        $isSub  = Test-SubagentPath $s.FullPath
+        $full   = Get-SessionData -JsonlPath $s.FullPath -Subagent:$isSub
+        $total  = $full.Turns.Count
+        # With -Search, the turns that mention the phrase are the point: show
+        # those, each cut around the mention. If none does (it was only in a
+        # tool call or the title), say so and show the usual ends instead.
+        $source = $full.Turns; $phrase = ''
+        if ($Search) {
+            $hitTurns = [object[]]@($full.Turns | Where-Object { $_.Text.IndexOf($Search, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+            if ($hitTurns.Count) { $source = $hitTurns; $phrase = $Search }
+        }
+        $picked = Select-TurnsForDisplay -SessionTurns $source -N $Turns
         $shown  = $picked.First.Count + $picked.Last.Count
+        $range  = if ($picked.Omitted -gt 0) { "first/last $Turns" } else { 'all' }
+        $turnsLine = if ($phrase) { "{0} of {1} mention '{2}' ({3})" -f $picked.Total, $total, $Search, $(if ($picked.Omitted -gt 0) { "showing the first/last $Turns of those" } else { 'showing those' }) }
+                     elseif ($Search) { "{0} of {1} ({2}); none mention '{3}', which is only in: {4}" -f $shown, $total, $range, $Search, $s.Found }
+                     else { "{0} of {1} ({2})" -f $shown, $total, $range }
+
+        $sessionLine = if ($s.Session) { $s.Session }
+                       elseif ($s.AiTitle) { "*{0}   (* = generated by Claude Code; /rename sets your own)" -f $s.AiTitle }
+                       else { '' }
+
+        # Ready to paste. The cd matters: Claude Code keeps a session under
+        # the project dir of the folder it ran in, so start it from there.
+        $id = [IO.Path]::GetFileNameWithoutExtension($s.File)
+        $projDir = Split-Path (Split-Path $s.FullPath -Parent) -Leaf
+        $notes = @()
+        if ($isSub) {
+            $sidecar = Split-Path (Split-Path $s.FullPath -Parent) -Parent
+            $id = Split-Path $sidecar -Leaf
+            $projDir = Split-Path (Split-Path $sidecar -Parent) -Leaf
+            $notes += 'the session this subagent belongs to'
+        }
+        $resume = if (-not (Test-SessionId $id)) { '(not named like a session ID, so there is nothing to resume)' } else {
+            $where = Get-ResumeFolder -Cwd $full.Cwd -DirName $projDir
+            if (-not $where) { $notes += 'no recorded folder maps to its project dir; run it from where the session ran' }
+            elseif (-not (Test-Path -LiteralPath $where)) { $notes += 'that folder no longer exists' }
+            if ($liveIds -contains $id) { $notes += 'running now in another window' }
+            $cmd = if ($where) { "cd '{0}'; claude --resume {1}" -f ($where -replace "'", "''"), $id } else { "claude --resume $id" }
+            $cmd + $(if ($notes.Count) { '   (' + ($notes -join '; ') + ')' } else { '' })
+        }
 
         $header = @(
             ('=' * 80),
             ("Index    : {0}" -f $(if ($null -ne $s.Index) { $s.Index } else { '(subagent transcript, not numbered)' })),
             ("Folder   : {0}" -f $s.Folder),
-            ("Session  : {0}" -f $s.Session),
+            ("Session  : {0}" -f $sessionLine),
             ("File     : {0}" -f $s.File),
             ("Modified : {0}" -f $s.Modified.ToString('yyyy-MM-dd HH:mm:ss')),
             ("Size     : {0:N0} KB" -f $s.Size),
             ("Context  : {0}" -f $(if ($null -ne $s.Context) { '{0:N0} tokens' -f $s.Context } else { 'unknown' })),
-            ("Model    : {0}" -f $(if ($s.Model) { $s.Model } else { 'unknown' })),
-            ("Turns    : {0} of {1}{2}" -f $shown, $picked.Total, $(if ($picked.Omitted -gt 0) { " (first/last $Turns)" } else { ' (all)' })),
+            ("Model    : {0}" -f $(if ($s.Model) { $s.Model } else { 'unknown' }))
+        )
+        if ($Search) { $header += ("Found    : {0}" -f $s.Found) }
+        $header += @(
+            ("Turns    : {0}" -f $turnsLine),
+            ("Resume   : {0}" -f $resume),
             ('-' * 80)
         )
         Write-Output ("{0}{1}{2}" -f $Green, ($header -join "`n"), $Reset)
@@ -2341,22 +2693,24 @@ if ($Open) {
             continue
         }
 
-        foreach ($t in $picked.First) { Write-TurnBlock -Turn $t -Max $MaxChars }
+        foreach ($t in $picked.First) { Write-TurnBlock -Turn $t -Max $MaxChars -Phrase $phrase }
         if ($picked.Omitted -gt 0) {
-            Write-Output ("{0}... [{1} turns omitted] ...{2}" -f $Dim, $picked.Omitted, $Reset)
+            $what = if ($phrase) { 'more turns that mention it' } else { 'turns' }
+            Write-Output ("{0}... [{1} {2} omitted] ...{3}" -f $Dim, $picked.Omitted, $what, $Reset)
             Write-Output ''
         }
-        foreach ($t in $picked.Last) { Write-TurnBlock -Turn $t -Max $MaxChars }
+        foreach ($t in $picked.Last) { Write-TurnBlock -Turn $t -Max $MaxChars -Phrase $phrase }
     }
     return
 }
 
 # ---- Table -----------------------------------------------------------------
 
-# The format XML (loaded before the -Orphans section) renders this type as an
-# autosized table instead of falling back to Format-List, the default once an
-# object has 5+ public properties.
+# The format XML (loaded before the -Orphans section) renders these types as
+# autosized tables instead of falling back to Format-List, the default once an
+# object has 5+ public properties. -Search results get the view with Found.
+$typeName = if ($Search) { 'CCSessionSearch' } else { 'CCSession' }
 foreach ($s in $Sessions) {
-    $s.PSObject.TypeNames.Insert(0, 'CCSession')
+    $s.PSObject.TypeNames.Insert(0, $typeName)
     $s
 }

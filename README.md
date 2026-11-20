@@ -24,12 +24,17 @@ There are four modes:
 | `Get-ClaudeCodeSessions -Orphans` | list what deleted and moved sessions left behind |
 
 ```
-Index Folder         Session                    Index Modified                Size Context Model    File
------ ------         -------                    ----- --------                ---- ------- -----    ----
-    1 \              deploy triage                  1 2026-08-30 17:14:28 2,463 KB     87k opus 5.5 a1b2c3d4-1111-4aaa-8bbb-1a2b3c4d5e6f.jsonl
-    2 \Code\MyApp32  MyApp32                        2 2026-08-07 19:15:02 5,636 KB    412k opus 5.5 b2c3d4e5-2222-4bbb-8ccc-2b3c4d5e6f70.jsonl
-    3 \Code\OtherApp otherapp-worker                3 2026-08-06 11:20:44 7,952 KB    156k opus 4.8 c3d4e5f6-3333-4ccc-8ddd-3c4d5e6f7081.jsonl
+Index Folder         Session                          Index Modified                Size Context Model    File
+----- ------         -------                          ----- --------                ---- ------- -----    ----
+    1 \              *Staging deploy hangs at migrate     1 2026-08-30 17:14:28 2,463 KB     87k opus 5.5 a1b2c3d4-1111-4aaa-8bbb-1a2b3c4d5e6f.jsonl
+    2 \Code\MyApp32  MyApp32                              2 2026-08-07 19:15:02 5,636 KB    412k opus 5.5 b2c3d4e5-2222-4bbb-8ccc-2b3c4d5e6f70.jsonl
+    3 \Code\OtherApp otherapp-worker                      3 2026-08-06 11:20:44 7,952 KB    156k opus 4.8 c3d4e5f6-3333-4ccc-8ddd-3c4d5e6f7081.jsonl
 ```
+
+`Session` is the title you gave a session with `/rename`. A session you never
+named shows the title Claude Code generated for it, with a `*` in front so it
+never passes for one of yours. It is the same text `claude --resume` lists,
+where the two kinds look alike.
 
 Columns are sized to their widest value, so long paths and titles are never
 truncated with `...`. `Size` is the transcript file alone; the `-Delete` plan
@@ -98,13 +103,18 @@ under 200k the window it ran on cannot be read back.
 |---|---|
 | `23` | the `Index` column from the table |
 | `d4e5f6a7` | a fragment of the file name / UUID |
-| `my-app` | a fragment of the `Session` name (set with `/rename`) |
+| `my-app` | a fragment of the `Session` title: yours, and for `-Open` a generated `*` one too |
 | `*` | everything currently listed. With `-Delete` it needs a filter first. |
 
 Fragments are literal and case-insensitive, so `[WIP]` means those five
 characters, not a wildcard. They may match several sessions; `-Open` prints
 each, and `-Delete` plans them all and asks once. A fragment that happens to
 match every session (`-` will) is treated like `*` and needs a filter too.
+
+`-Delete` only goes by titles you set yourself. A fragment that matches nothing
+but generated titles is refused with their indexes, and when a sweep such as
+`-Delete delete` also matches generated titles, the plan names the ones it
+left out. A tombstone sweep can never catch a title you did not write.
 
 Indexes are assigned before any filter runs, so `-Search x` shows the same
 numbers a bare listing would. They do change when a session is added,
@@ -116,7 +126,9 @@ anything.
 
 **Tab completion:** press `Tab` after `-Open` or `-Delete` to cycle through
 your real session handles, custom titles first, then UUID file names, each
-with a folder and timestamp tooltip. A title is quoted whenever PowerShell
+with a folder and timestamp tooltip. After `-Open`, generated titles come
+next, listed as `*title`; `-Delete` leaves them out, since it never matches
+them. A title is quoted whenever PowerShell
 would otherwise misread it (spaces, `#`, `,`, `$`, parentheses, a leading
 `-`). Title lookups are cached per file and refresh when a session changes.
 When nothing matches what you typed, PowerShell falls back to file names; a
@@ -148,6 +160,7 @@ Size     : 931 KB
 Context  : 131,507 tokens
 Model    : claude-opus-5-5
 Turns    : 2 of 45 (first/last 1)
+Resume   : cd 'C:\Users\you'; claude --resume d4e5f6a7-4444-4ddd-8eee-4d5e6f708192
 --------------------------------------------------------------------------------
 [USER] 2026-08-26 09:14:05
 the staging deploy hangs at the migrate step
@@ -157,6 +170,12 @@ the staging deploy hangs at the migrate step
 [CLAUDE] 2026-08-27 19:42:33
 Done, and verified end to end...
 ```
+
+The `Resume` line is ready to paste. It changes into the folder the session
+ran in, which is where Claude Code keeps it, and resumes it by ID, so once you
+have found a session here you never have to find it again in the picker. It
+also says when the session is running in another window right now, or when
+its folder no longer exists.
 
 ### Search transcripts
 
@@ -171,6 +190,49 @@ mean themselves. Transcripts store a backslash as `\\` and a quote as `\"`;
 the phrase is tried both as typed and in that escaped form, so a path search
 finds what it should.
 
+Each hit gets a `Found` column saying where the phrase is, so the session you
+are after stands out from the ones that only brush against it:
+
+```
+1 more session(s) mention 'staging migrate' only in what Claude Code adds on its own (instructions, memory, its own records). Add -Everywhere to list them.
+
+Index Folder        Session                          Found                            Index ...
+----- ------        -------                          -----                            -----
+    1 \             *Staging deploy hangs at migrate title, you 2, Claude 5, tools 14     1 ...
+    6 \Code\MyApp32 MyApp32                          tools 1                              6 ...
+```
+
+| Found | The phrase is in |
+|---|---|
+| `title` | the session's title, yours or generated |
+| `folder` | only the folder the session ran in (the `cwd` every record carries) |
+| `you` | something you typed, including a prompt queued while Claude was busy |
+| `Claude` | Claude's replies |
+| `tools` | tool calls and their output, and subagent work |
+| `files` | files put into the conversation |
+| `other` | records the script does not recognize, including lines that do not parse; listed rather than hidden |
+| `auto` | what Claude Code adds on its own: instructions (CLAUDE.md and the memory index), reminders, hook output, copies of requests, its own bookkeeping |
+
+`auto` hits are left out by default, and the line above the table counts the
+sessions dropped that way. Claude Code injects a folder's CLAUDE.md and memory
+index into every session started there, so one word in a memory file would
+otherwise match every one of them. `-Everywhere` puts them back, with `auto N`
+in `Found`. `-Search x -Delete *` plans only what the table shows, so a
+session that merely carries the phrase in its memory is never swept.
+
+Add `-Open` and the search shows the turns that mention the phrase instead of
+the first and last 10, each cut around the mention, with `...` where text was
+dropped and every mention highlighted. `-Turns` still caps how many:
+
+```
+Found    : title, you 2, Claude 5, tools 14
+Turns    : 4 of 38 mention 'staging migrate' (showing those)
+Resume   : cd 'C:\Users\you'; claude --resume a1b2c3d4-1111-4aaa-8bbb-1a2b3c4d5e6f
+```
+
+When no turn mentions it (the phrase was only in a tool call, say), the header
+says where it was and the usual first and last turns are shown.
+
 Searching from inside a Claude Code session also matches that session, since
 the prompt holding the phrase is logged to its transcript. `-Delete` never
 deletes the running session, so the extra hit is harmless.
@@ -182,7 +244,7 @@ filters:
 
 ```powershell
 Get-ClaudeCodeSessions -OlderThan 90                 # untouched for 90+ days
-Get-ClaudeCodeSessions -SmallerThan 5 -Unnamed       # tiny and never titled
+Get-ClaudeCodeSessions -SmallerThan 5 -Unnamed       # tiny and never /renamed
 ```
 
 ### Cleanup
@@ -436,12 +498,13 @@ throwing away.
 | `-Open <sel>` | Print the conversation for the matched session(s). |
 | `-Delete <sel>` | Permanently delete the matched session(s) and their whole footprint. Requires typing `yes`, or `all` to also remove what the delete leaves behind. |
 | `-Orphans` | List what no live session can reach. With `-Delete`, remove them: `o#`, a kind, `dormant`, a path fragment, or `*` (orphans only). |
-| `-Search <string>` | Filter to sessions whose transcripts contain the literal phrase. Backslashes and quotes are matched as typed. |
+| `-Search <string>` | Filter to sessions whose transcripts contain the literal phrase, with a `Found` column saying where. Backslashes and quotes are matched as typed. With `-Open`, shows the turns that mention it. |
+| `-Everywhere` | With `-Search`, also count what Claude Code adds on its own (instructions, memory, reminders, its own records), shown as `auto` in `Found`. |
 | `-Turns <N>` | With `-Open`, turns to print from each end. Default 10, `0` = all. |
 | `-MaxChars <N>` | Truncate each turn's text. Default 600, `0` = no truncation. |
 | `-OlderThan <N>` | Keep only sessions older than N days (by `Modified`). 0 disables. |
 | `-SmallerThan <N>` | Keep only sessions under N KB. 0 disables. |
-| `-Unnamed` | Keep only sessions with no custom title (`/rename`). |
+| `-Unnamed` | Keep only sessions you never named with `/rename`; they may still show a generated `*` title. |
 | `-Limit <N>` | Keep the first N rows left after the filters, in table order. 0 = no limit. |
 | `-IncludeSubagents` | Also list subagent transcripts, without an Index, right under their session. They are deleted with it, never on their own. |
 | `-NoColor` | Disable ANSI colors. Useful when redirecting to a file. |
@@ -459,7 +522,8 @@ invoked. `-Open` reads naturally and avoids the conflict.
 |---|---|
 | `Index` | Position in the sorted list, root transcripts only. Assigned before every filter runs, `-Search` included. Changes when a session is added, removed or written to. |
 | `Folder` | The `cwd` recorded on the session's first turn, shown relative to your home directory. `\` means the home directory itself. Without one, the folder Claude Code recorded for that project dir, and only then the dir name decoded, which is a guess. |
-| `Session` | The custom title set with `/rename`. Latest title wins if renamed mid-conversation. Blank if never named. |
+| `Session` | The title you set with `/rename`. Without one, the title Claude Code generated (`ai-title` records, the text the resume picker shows), marked `*`. For either, the latest wins if it changed mid-conversation. On the objects, `Session` holds only yours and `AiTitle` the generated one, so `Where-Object Session` keeps meaning "named by you". |
+| `Found` | With `-Search` only: where the phrase is. See [Search transcripts](#search-transcripts). |
 | `Modified` | Filesystem mtime of the JSONL. |
 | `Size` | The transcript file alone, in KB, rounded up (a 300-byte file shows `1 KB`, as in Explorer). The rest of a session's footprint shows in the `-Delete` plan. |
 | `Context` | Tokens in context as of the last reply: input + cache writes + cache reads + output from that reply's `usage`. This is the same sum Claude Code uses (its own compaction records match it to the token). If the session was compacted after its last reply, it is the compacted size. Shown in decimal `k`, rounded half up, because windows are quoted as 200k / 1M; `<1k` under 1,000. Blank if nothing ever replied. |
@@ -495,5 +559,6 @@ Sessions sort by `Folder` ascending, then `Modified` descending.
   in your profile cannot change how it reads transcripts.
 - ANSI colors require a terminal that supports them (Windows Terminal, modern
   VS Code terminal, recent ConEmu). Use `-NoColor` when redirecting.
-- Custom titles come from `custom-title` events embedded in the JSONL. If you
-  have never run `/rename` in a session, that column stays empty.
+- Titles come from records embedded in the JSONL: `custom-title` for yours
+  (`/rename`), `ai-title` for the one Claude Code generates. A session with
+  neither shows a blank `Session`.
