@@ -2,10 +2,12 @@
 
 A PowerShell script for the session transcripts Claude Code piles up under
 `~\.claude\projects`. It shows every session in one table, with where it ran,
-what you called it, how big it is and what it needs to resume, and prints any
-conversation. When you delete a session it takes the hidden data that session
-owns along with it, after showing you exactly what that is. `-Orphans` finds
-what earlier deletes and moves left behind.
+what it is called, how big it is and what it needs to resume. Search says
+where in each session your phrase turned up, and once you have the one you
+want it prints the conversation or resumes it from the folder it ran in.
+When you delete a session it takes the hidden data that session owns along
+with it, after showing you exactly what that is. `-Orphans` finds what
+earlier deletes and moves left behind.
 
 ## What it does
 
@@ -47,8 +49,9 @@ shows everything else a session owns.
 - PowerShell 7 or later. The script reads JSON with `ConvertFrom-Json
   -AsHashtable`, which Windows PowerShell 5.1 does not have, so it refuses to
   start there (`#Requires -Version 7.0`) rather than quietly reading nothing.
-- Claude Code installed. `-Help` works without it. The script only reads
-  unless you pass `-Delete`.
+- Claude Code installed; `-Help` works without it. `-Resume` also needs its
+  `claude` command on `PATH`. The script itself only reads unless you pass
+  `-Delete`.
 
 ## Installation
 
@@ -104,20 +107,22 @@ under 200k the window it ran on cannot be read back.
 |---|---|
 | `23` | the `Index` column from the table |
 | `d4e5f6a7` | a fragment of the file name / UUID |
-| `my-app` | a fragment of the `Session` title: yours, and for `-Open` and `-Resume` a generated `*` one too |
+| `my-app` | a fragment of the `Session` title as the table shows it: yours, and for `-Open` and `-Resume` a generated one too, `*` and all |
 | `*` | everything currently listed. With `-Delete` it needs a filter first. |
 
 All digits always means an Index, so a session ID that starts with eight
 digits needs a little more of it (`12345678-0089`); the error says so and
-shows the form to use. Fragments are literal and case-insensitive, so `[WIP]` means those five
-characters, not a wildcard. They may match several sessions; `-Open` prints
-each, and `-Delete` plans them all and asks once. A fragment that happens to
-match every session (`-` will) is treated like `*` and needs a filter too.
+shows the form to use. Fragments are literal and case-insensitive, so
+`[WIP]` means those five characters, not a wildcard. They may match several
+sessions: `-Open` prints each, `-Resume` lists them for you to pick one, and
+`-Delete` plans them all and asks once. A fragment that happens to match
+every session (`-` will) is treated like `*` and needs a filter too.
 
 `-Delete` only goes by titles you set yourself. A fragment that matches nothing
-but generated titles is refused with their indexes, and when a sweep such as
-`-Delete delete` also matches generated titles, the plan names the ones it
-left out. A tombstone sweep can never catch a title you did not write.
+but generated titles (a `*title` pasted from the table, say) is refused with
+their indexes, and when a sweep such as `-Delete delete` also matches
+generated titles, the plan names the ones it left out. A tombstone sweep can
+never catch a title you did not write.
 
 Indexes are assigned before any filter runs, so `-Search x` shows the same
 numbers a bare listing would. They do change when a session is added,
@@ -127,14 +132,15 @@ renumbers the ones it passes. That is why the delete plan prints each
 target's first prompt: a stale index shows up there before it costs you
 anything.
 
-**Tab completion:** press `Tab` after `-Open`, `-Resume` or `-Delete` to cycle through
-your real session handles, custom titles first, then UUID file names, each
-with a folder and timestamp tooltip. After `-Open` and `-Resume`, generated titles come
-next, listed as `*title`; `-Delete` leaves them out, since it never matches
-them. A title is quoted whenever PowerShell
-would otherwise misread it (spaces, `#`, `,`, `$`, parentheses, a leading
-`-`). Title lookups are cached per file and refresh when a session changes.
-When nothing matches what you typed, PowerShell falls back to file names; a
+**Tab completion:** press `Tab` after `-Open`, `-Resume` or `-Delete` to
+cycle through your real session handles, each with a folder and timestamp
+tooltip: custom titles first, then generated titles, then UUID file names.
+Generated titles come only after `-Open` and `-Resume`, listed and inserted
+as `*title`; type `*` first to list just those. `-Delete` leaves them out,
+since it never matches them. A title is quoted whenever PowerShell would
+otherwise misread it (spaces, `#`, `,`, `$`, parentheses, a leading `-`).
+Title lookups are cached per file and refresh when a session changes. When
+nothing matches what you typed, PowerShell falls back to file names; a
 completer cannot prevent that.
 
 ### Read a conversation
@@ -204,6 +210,7 @@ It starts nothing, and says why, when it cannot do this safely:
 - a running session's registry entry cannot be read, so that is unknown,
 - the folder is gone, or no recorded folder maps to the session's project dir,
 - `claude` is not on `PATH`; then it prints the command to run yourself.
+
 ### Search transcripts
 
 ```powershell
@@ -489,6 +496,10 @@ throwing away.
   writes, so the other copy stays deletable. If that cannot be pinned down,
   every copy is protected. If a running session's registry entry cannot be
   read at all, nothing is deleted until it can.
+- **`-Resume` never puts a second window on a session.** It refuses a
+  session that is running right now, and refuses every session while a
+  running one's registry entry cannot be read, since that entry might belong
+  to the one you asked for.
 - **Ambiguous selectors are refused.** A UUID fragment or title that matches
   both copies of a moved session would delete both, so it stops and lists the
   copies' indexes instead. `*` after a filter still takes everything matched.
@@ -574,7 +585,8 @@ Sessions sort by `Folder` ascending, then `Modified` descending.
 ## Notes
 
 - The script never *modifies* session files. The only write operations are
-  `-Delete` and `-Orphans -Delete`.
+  `-Delete` and `-Orphans -Delete`. `-Resume` writes nothing itself; the
+  `claude` it starts goes on writing the transcript as usual.
 - If `.claude\projects` is redirected into OneDrive, Files-On-Demand marks
   synced directories `ReadOnly + ReparsePoint`. Both `Remove-Item` and
   `Directory.Delete` fail on those with access-denied until the attribute is

@@ -135,8 +135,9 @@
       - Integer:   matches the Index column from the table view
       - Substring: matches the file name without .jsonl (a UUID fragment
                    is fine)
-      - Substring: matches the Session title: yours, or the one Claude Code
-                   generated when you set none (the *title in the table)
+      - Substring: matches the Session title as the table shows it: yours,
+                   or the *title Claude Code generated when you set none,
+                   so one pasted from the table works with its * or without
       - '*':       every session currently listed
     Substring matches are literal and case-insensitive and may return
     several sessions, in which case each is printed in turn.
@@ -182,8 +183,8 @@
 
     Titles Claude Code generated never select anything for -Delete, so a
     sweep like '-Delete delete' only takes titles you wrote. A fragment that
-    matches only generated titles is refused with their indexes, and the
-    plan names any it left out.
+    matches only generated titles (a *title pasted from the table, say) is
+    refused with their indexes, and the plan names any it left out.
 
     The plan lists every part about to go (transcript, subagent transcripts,
     saved tool output, file snapshots and so on) with its real path, file
@@ -349,8 +350,9 @@ param(
         param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
 
         # Offers session handles instead of file names: custom titles first,
-        # then UUIDs. (When nothing here matches what was typed, PowerShell
-        # falls back to suggesting files; a completer cannot prevent that.)
+        # then generated *titles, then UUIDs. (When nothing here matches what
+        # was typed, PowerShell falls back to suggesting files; a completer
+        # cannot prevent that.)
         $root = Join-Path $env:USERPROFILE '.claude\projects'
         if (-not (Test-Path -LiteralPath $root)) { return }
         $word = $wordToComplete.Trim("'", '"')
@@ -362,6 +364,7 @@ param(
         $aiTitles = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
         $files  = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
         $seen   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $seenAi = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $homePath = $env:USERPROFILE.TrimEnd('\')
         foreach ($dir in Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue) {
             foreach ($file in Get-ChildItem -LiteralPath $dir.FullName -Filter *.jsonl -File -Force -ErrorAction SilentlyContinue) {
@@ -405,14 +408,16 @@ param(
                     }
                     $titles.Add([System.Management.Automation.CompletionResult]::new(
                         $completion, $title, 'ParameterValue', ("Session: {0}  ({1}, {2})" -f $title, $entry.Folder, $when)))
-                } elseif (-not $title -and $entry.AiTitle -and (-not $word -or $entry.AiTitle.IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and $seen.Add($entry.AiTitle)) {
-                    # Generated titles too, listed as *title like the table.
-                    # What gets inserted is the plain title, which -Open matches
-                    # (-Delete does not, so its completer leaves these out).
+                } elseif (-not $title -and $entry.AiTitle -and (-not $word -or ('*' + $entry.AiTitle).IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and $seenAi.Add($entry.AiTitle)) {
+                    # Generated titles too, written *title as in the table:
+                    # listed, matched and inserted that way, so typing * first
+                    # lists only these, and the inserted *title never picks a
+                    # title of yours with the same words. -Open and -Resume
+                    # take it; -Delete does not, so its completer leaves these
+                    # out. They keep a set of their own so that one of them
+                    # never hides one of yours.
                     $ai = $entry.AiTitle
-                    $completion = if ($ai -match '^[\w.][\w.-]*$') { $ai } else {
-                        "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($ai) + "'"
-                    }
+                    $completion = "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent("*$ai") + "'"
                     $aiTitles.Add([System.Management.Automation.CompletionResult]::new(
                         $completion, "*$ai", 'ParameterValue', ("Generated title: {0}  ({1}, {2})" -f $ai, $entry.Folder, $when)))
                 }
@@ -520,8 +525,9 @@ param(
         param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
 
         # Offers session handles instead of file names: custom titles first,
-        # then UUIDs. (When nothing here matches what was typed, PowerShell
-        # falls back to suggesting files; a completer cannot prevent that.)
+        # then generated *titles, then UUIDs. (When nothing here matches what
+        # was typed, PowerShell falls back to suggesting files; a completer
+        # cannot prevent that.)
         $root = Join-Path $env:USERPROFILE '.claude\projects'
         if (-not (Test-Path -LiteralPath $root)) { return }
         $word = $wordToComplete.Trim("'", '"')
@@ -533,6 +539,7 @@ param(
         $aiTitles = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
         $files  = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
         $seen   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $seenAi = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $homePath = $env:USERPROFILE.TrimEnd('\')
         foreach ($dir in Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue) {
             foreach ($file in Get-ChildItem -LiteralPath $dir.FullName -Filter *.jsonl -File -Force -ErrorAction SilentlyContinue) {
@@ -576,14 +583,16 @@ param(
                     }
                     $titles.Add([System.Management.Automation.CompletionResult]::new(
                         $completion, $title, 'ParameterValue', ("Session: {0}  ({1}, {2})" -f $title, $entry.Folder, $when)))
-                } elseif (-not $title -and $entry.AiTitle -and (-not $word -or $entry.AiTitle.IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and $seen.Add($entry.AiTitle)) {
-                    # Generated titles too, listed as *title like the table.
-                    # What gets inserted is the plain title, which -Open matches
-                    # (-Delete does not, so its completer leaves these out).
+                } elseif (-not $title -and $entry.AiTitle -and (-not $word -or ('*' + $entry.AiTitle).IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and $seenAi.Add($entry.AiTitle)) {
+                    # Generated titles too, written *title as in the table:
+                    # listed, matched and inserted that way, so typing * first
+                    # lists only these, and the inserted *title never picks a
+                    # title of yours with the same words. -Open and -Resume
+                    # take it; -Delete does not, so its completer leaves these
+                    # out. They keep a set of their own so that one of them
+                    # never hides one of yours.
                     $ai = $entry.AiTitle
-                    $completion = if ($ai -match '^[\w.][\w.-]*$') { $ai } else {
-                        "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($ai) + "'"
-                    }
+                    $completion = "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent("*$ai") + "'"
                     $aiTitles.Add([System.Management.Automation.CompletionResult]::new(
                         $completion, "*$ai", 'ParameterValue', ("Generated title: {0}  ({1}, {2})" -f $ai, $entry.Folder, $when)))
                 }
@@ -647,7 +656,7 @@ ${Bold}SELECTORS${Reset} (for -Open, -Resume and -Delete)
   ${Cyan}23${Reset}          the Index column from the table
   ${Cyan}d4e5f6a7${Reset}    a fragment of the file name / UUID
   ${Cyan}my-app${Reset}      a fragment of the Session title. -Open and -Resume also match the
-              *titles Claude Code generated; -Delete never does.
+              *titles Claude Code generated, * included; -Delete never does.
   ${Cyan}*${Reset}           everything currently listed. With -Delete it needs a filter
               first, and so does a fragment that matches every session.
   Indexes shift when a session is added, removed or written to (the table is
@@ -687,7 +696,7 @@ ${Bold}OTHER${Reset}
 
 ${Bold}WHAT -Delete ACTUALLY REMOVES${Reset}
   A session is not one file. -Delete sweeps the whole footprint:
-    ${Dim}projects\<proj>\<uuid>.jsonl        the transcript${Reset}
+    ${Dim}projects\<proj>\<uuid>.jsonl       the transcript${Reset}
     ${Dim}projects\*\<uuid>\                 sidecar: subagents\ + tool-results\${Reset}
     ${Dim}file-history\<uuid>\               edit snapshots (often the biggest part)${Reset}
     ${Dim}session-env\<uuid>\  tasks\<uuid>\  jobs\<first8>\${Reset}
@@ -713,6 +722,7 @@ ${Bold}SAFETY${Reset}
   ${Dim}- Deletion is permanent: there is no Recycle Bin.${Reset}
   ${Dim}- Your home folder's memory is never removed, by any mode.${Reset}
   ${Dim}- The running copy of a session is always skipped, so it cannot delete itself.${Reset}
+  ${Dim}- -Resume never opens a session that is running in another window.${Reset}
   ${Dim}- An unreadable registry entry of a running session stops every delete.${Reset}
   ${Dim}- A UUID or title that matches both copies of a moved session is refused.${Reset}
   ${Dim}- A sidecar goes with -Delete only once no transcript with that UUID exists in${Reset}
@@ -1226,11 +1236,12 @@ function Write-TurnBlock {
 }
 
 function Select-BySelector {
-    # Shared matching for -Open and -Delete: index, or substring of filename
-    # or custom title. '*' means "the whole current set". -WithAiTitles also
-    # matches the title Claude Code generated, the *title the table shows
-    # when there is no /rename title. -Open passes it; -Delete never does, so
-    # a sweep like '-Delete delete' only takes titles you wrote yourself.
+    # Shared matching for -Open, -Resume and -Delete: index, or substring of
+    # filename or custom title. '*' means "the whole current set".
+    # -WithAiTitles also matches the title Claude Code generated, the *title
+    # the table shows when there is no /rename title. -Open and -Resume pass
+    # it; -Delete never does, so a sweep like '-Delete delete' only takes
+    # titles you wrote yourself.
     param([object]$Candidates, [string]$Selector, [switch]$WithAiTitles)
     # [object[]] rather than @() - see the note in Select-TurnsForDisplay.
     $list = @()
@@ -1248,8 +1259,11 @@ function Select-BySelector {
     # "any title containing W, I or P". The stem, not the file name, or
     # 'jsonl' and '.' would match every session.
     return @($list | Where-Object {
-        # The title as shown: yours, or the generated one when you set none.
-        $shownTitle = if ($_.Session) { [string]$_.Session } elseif ($WithAiTitles -and $_.PSObject.Properties['AiTitle']) { [string]$_.AiTitle } else { '' }
+        # The title as the table shows it: yours, or the generated one with
+        # its * in front when you set none. So a generated title pasted from
+        # the table, * included, matches it, and not your own title with the
+        # same words.
+        $shownTitle = if ($_.Session) { [string]$_.Session } elseif ($WithAiTitles -and $_.PSObject.Properties['AiTitle'] -and $_.AiTitle) { '*' + $_.AiTitle } else { '' }
         [IO.Path]::GetFileNameWithoutExtension($_.File).IndexOf($Selector, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         ($shownTitle -and $shownTitle.IndexOf($Selector, [StringComparison]::OrdinalIgnoreCase) -ge 0)
     })
